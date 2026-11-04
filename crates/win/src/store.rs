@@ -10,6 +10,12 @@ use crate::dpapi;
 use crate::log::Logger;
 use crate::paths::Paths;
 
+/// 配置备份的签名文件名。
+///
+/// 与 `paths::BACKUP_FILE`（`config.json.bak`）成对使用：备份自身也必须被签名覆盖，
+/// 否则「删掉主配置、改掉备份」就能变成一条绕过完整性校验的捷径。
+const BACKUP_MAC_FILE: &str = "config.mac.bak";
+
 /// 加载结果。
 #[derive(Debug)]
 pub enum Load {
@@ -111,13 +117,37 @@ impl Store {
 
     /// 读取并校验配置。
     pub fn load(&self) -> Load {
-        let config_path = self.paths.config();
+        self.load_from(&self.paths.config(), &self.paths.mac())
+    }
+
+    /// 读取并校验「上一次已知良好」的配置备份。
+    ///
+    /// 与 `Store::load` 走**完全相同**的校验流程；备份签名与备份配置成对存放
+    /// （`config.json.bak` + `config.mac.bak`），因此篡改备份内容同样会验签失败，
+    /// 不会成为绕过口子。
+    pub fn load_backup(&self) -> Load {
+        self.load_from(&self.paths.backup(), &self.paths.file(BACKUP_MAC_FILE))
+    }
+
+    /// 是否已经有过一次成功保存（存在配置备份）。
+    ///
+    /// 用于区分「真正首次安装」与「配置被删但曾初始化过」：前者应打开初始化窗口，
+    /// 后者不能，否则删掉 `config.json` 再调一次 `/api/setup` 就能把封锁规则清零。
+    pub fn has_backup(&self) -> bool {
+        self.paths.backup().exists()
+    }
+
+    /// 从一对「配置 + 签名」文件读取并校验。
+    ///
+    /// 主配置与备份共用这一条路径，避免两边的校验流程漂移（少一步就是绕过）：
+    /// 存在性 → 读文件 → 反序列化 → 规范化序列化 → 取密钥 → 解析签名 → 验签 → 结构校验。
+    fn load_from(&self, config_path: &Path, signature_path: &Path) -> Load {
         if !config_path.exists() {
             return Load::Absent;
         }
         let (text, signature) = match (
-            std::fs::read(&config_path),
-            std::fs::read_to_string(self.paths.mac()),
+            std::fs::read(config_path),
+            std::fs::read_to_string(signature_path),
         ) {
             (Ok(text), Ok(sig)) => (text, sig),
             (Err(e), _) => return Load::Tampered(format!("配置无法读取：{e}")),
@@ -163,10 +193,25 @@ impl Store {
 
         let config_path = self.paths.config();
         if config_path.exists() {
-            let _ = std::fs::copy(&config_path, self.paths.backup());
+            // 只把「当前磁盘配置仍能通过校验」的版本写进备份。
+            // 否则配置被篡改后只要触发一次保存（例如一次失败的登录也会落盘失败计数），
+            // 坏内容就会覆盖掉最后一份可信备份，fail-closed 的退路当场失效。
+            if matches!(
+                self.load_from(&config_path, &self.paths.mac()),
+                Load::Ok(_)
+            ) {
+                let _ = std::fs::copy(&config_path, self.paths.backup());
+                let _ = std::fs::copy(self.paths.mac(), self.paths.file(BACKUP_MAC_FILE));
+            }
         }
         write_atomic(&config_path, &pretty)?;
         write_atomic(&self.paths.mac(), signature.as_bytes())?;
+        // 首次保存（此前没有旧配置可备份）时把刚写入的这份作为备份起点：
+        // 这样安装完成后立刻被篡改也还有一份可信名单可退，而不是退化到空名单。
+        if !self.paths.backup().exists() {
+            let _ = std::fs::copy(&config_path, self.paths.backup());
+            let _ = std::fs::copy(self.paths.mac(), self.paths.file(BACKUP_MAC_FILE));
+        }
         Ok(())
     }
 

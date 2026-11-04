@@ -66,6 +66,9 @@ wsh -f win .agent/win/redeploy.ps1        # install.ps1 -Force，不重复初始
 `C:\Windows\System32\curl.exe` 在拦截时段访问失败而 `Invoke-WebRequest` 正常；
 手机连本机热点时上网不受影响。
 
+已知例外：名单内 `curl.exe` 访问**域名**时会因 DNS 被拦而自身崩溃（退出码 `0xC0000005`），
+这是 curl 8.13 的缺陷。判断拦截是否生效请用纯 IP 目标（应为 exit 7）或 `curlcopy.exe` 对照。
+
 ## 六、已经踩过的坑（改相关代码前必读）
 
 | 症状 | 真正原因 |
@@ -76,6 +79,7 @@ wsh -f win .agent/win/redeploy.ps1        # install.ps1 -Force，不重复初始
 | 安装时 `Access denied` 写预置 | 先收紧目录 ACL 再写文件；`Invoke-Setup` 必须临时放开 `Administrators:(F)` |
 | 服务删不掉（`sc delete` 返回 5） | SDDL 里 `SY` 缺 `SD`/`WD`；且收紧后只能经 `Invoke-AsSystem`（SYSTEM 计划任务）删除 |
 | 只缺单层时过滤器越堆越多 | `reconcile` 要按 v4/v6 分别补齐（`add_block_layers`），不要整对重加 |
+| `FWP_E_LIFETIME_MISMATCH` 加完持久化标志仍报 | 早期版本的非持久化同名 Provider/子层残留，「已存在」被当成功 → 必须先 `FwpmSubLayerDeleteByKey0` + `FwpmProviderDeleteByKey0` 再重建（`dc40ec5`） |
 
 WFP 侧权威常量在 `/opt/winsys/windows-sys-0.59.0/src/Windows/Win32/Foundation/mod.rs`
 （`FWP_E_*`）与 `.../NetworkManagement/WindowsFilteringPlatform/mod.rs`（`FWPM_*_FLAG_*`），

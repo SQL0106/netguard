@@ -46,8 +46,14 @@ impl Api {
         }
     }
 
+    /// 初始化窗口是否开放。
+    ///
+    /// 只对「真正首次安装」开放：主配置不存在**且**没有任何配置备份。
+    /// 否则删掉 `config.json` 就能重新进入初始化流程（`/api/setup` 免认证），
+    /// 把认证方式改成「无需认证」并把名单清空 —— 那会把 fail-closed 直接抵消掉。
+    /// 需要重置时走安装脚本（`install.ps1 -Force` 的 CLI 初始化），不经过这条 HTTP 路径。
     fn setup_open(&self) -> bool {
-        if self.engine.store().is_initialized() {
+        if self.engine.store().is_initialized() || self.engine.store().has_backup() {
             return false;
         }
         let until = *self.setup_until.lock().unwrap();
@@ -362,6 +368,8 @@ fn handle_config_get(api: &Api, request: &Request) -> Response<std::io::Cursor<V
         return fail(401, "需要登录");
     }
     // 认证材料不下发到浏览器：口令散列、动态口令种子与恢复码散列只留在服务端。
+    // 前端会把这份对象原样 PUT 回来，因此 `Config::auth` 必须允许缺省
+    // （见 `config.rs` 的同名字段文档），否则每次保存都会 400。
     let mut value = serde_json::to_value(&snapshot.config).unwrap_or(Value::Null);
     if let Some(map) = value.as_object_mut() {
         map.remove("auth");
@@ -405,6 +413,8 @@ fn handle_config_put(api: &Api, request: &mut Request) -> Response<std::io::Curs
 
     let current = api.engine.snapshot().config;
     config.version = netguard_core::config::CONFIG_VERSION;
+    // 认证材料一律以服务端当前配置为准：请求里通常根本没有 `auth`（GET 时被删掉了），
+    // 即使有也不采信，避免有人靠 PUT 改认证方式或塞自己的散列。
     config.auth.factors = current.auth.factors;
     if config.auth.password_hash.is_none() {
         config.auth.password_hash = current.auth.password_hash.clone();

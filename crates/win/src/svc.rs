@@ -17,7 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 use netguard_core::schedule::evaluate;
-use windows_sys::Win32::Foundation::NO_ERROR;
+use windows_sys::Win32::Foundation::{ERROR_SERVICE_SPECIFIC_ERROR, NO_ERROR};
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SetServiceStatus, StartServiceCtrlDispatcherW, SERVICE_ACCEPT_NETBINDCHANGE,
     SERVICE_ACCEPT_PARAMCHANGE, SERVICE_ACCEPT_POWEREVENT, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
@@ -40,39 +40,74 @@ const PBT_APMSUSPEND: u32 = 0x0004;
 const PBT_APMRESUMESUSPEND: u32 = 0x0007;
 const PBT_APMRESUMEAUTOMATIC: u32 = 0x0012;
 
+/// 启动失败时写进 `dwServiceSpecificExitCode` 的值（必须非 0）。
+///
+/// `dwWin32ExitCode` 会同时填 `ERROR_SERVICE_SPECIFIC_ERROR`，这样 `sc query` /
+/// `net start` / 事件日志才不会把「启动失败」看成「正常停止」。
+const START_FAILED_EXIT_CODE: u32 = 1;
+
 static CURRENT_STATE: AtomicU32 = AtomicU32::new(SERVICE_START_PENDING);
 static STATUS_HANDLE: OnceLock<Mutex<usize>> = OnceLock::new();
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static TICKER: OnceLock<Ticker> = OnceLock::new();
 static LOGGER: OnceLock<std::sync::Arc<Logger>> = OnceLock::new();
+/// 后台线程句柄，供停止路径做「尽力回收」。
+static THREADS: OnceLock<Mutex<Vec<thread::JoinHandle<()>>>> = OnceLock::new();
 
 fn status_handle() -> &'static Mutex<usize> {
     STATUS_HANDLE.get_or_init(|| Mutex::new(0))
+}
+
+fn threads() -> &'static Mutex<Vec<thread::JoinHandle<()>>> {
+    THREADS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 记录一个后台线程，停止时据此回收已经自行结束的线程。
+fn track(handle: thread::JoinHandle<()>) {
+    let mut guard = threads().lock().unwrap_or_else(|err| err.into_inner());
+    guard.push(handle);
 }
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn report(state: u32, accepted: u32, wait_hint: u32) {
+/// 上报服务状态。
+///
+/// `specific_exit_code` 非 0 表示「服务自定义错误」：`dwWin32ExitCode` 填
+/// `ERROR_SERVICE_SPECIFIC_ERROR`，具体原因放 `dwServiceSpecificExitCode`。
+fn report(state: u32, accepted: u32, wait_hint: u32, specific_exit_code: u32) {
     CURRENT_STATE.store(state, Ordering::SeqCst);
-    let handle = status_handle();
-    let guard = match handle.lock() {
-        Ok(guard) => guard,
-        Err(_) => return,
+    let raw = {
+        let handle = status_handle();
+        // 锁中毒不致命：拿到的句柄仍然有效，不上报才会真的把服务卡死。
+        let guard = handle.lock().unwrap_or_else(|err| err.into_inner());
+        *guard
     };
-    if *guard == 0 {
+    if raw == 0 {
         return;
     }
     let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
     status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     status.dwCurrentState = state;
     status.dwControlsAccepted = accepted;
-    status.dwWin32ExitCode = NO_ERROR;
+    if specific_exit_code == 0 {
+        status.dwWin32ExitCode = NO_ERROR;
+        status.dwServiceSpecificExitCode = 0;
+    } else {
+        status.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+        status.dwServiceSpecificExitCode = specific_exit_code;
+    }
     status.dwCheckPoint = 0;
     status.dwWaitHint = wait_hint;
-    unsafe {
-        SetServiceStatus(*guard as SERVICE_STATUS_HANDLE, &status);
+    let ok = unsafe { SetServiceStatus(raw as SERVICE_STATUS_HANDLE, &status) };
+    if ok == 0 {
+        if let Some(logger) = LOGGER.get() {
+            logger.warn(&format!(
+                "上报服务状态失败：{}",
+                io::Error::last_os_error()
+            ));
+        }
     }
 }
 
@@ -88,8 +123,10 @@ fn accepted_controls() -> u32 {
 unsafe extern "system" fn handler(control: u32, event_type: u32, event_data: *mut c_void, _context: *mut c_void) -> u32 {
     match control {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
+            // 先置位再上报 STOP_PENDING：`service_main` 的启动收尾据此判断
+            // 「启动期间已经要求停止」，不会把状态倒灌回 RUNNING。
             SHUTDOWN.store(true, Ordering::SeqCst);
-            report(SERVICE_STOP_PENDING, 0, 5_000);
+            report(SERVICE_STOP_PENDING, 0, 5_000, 0);
             if let Some(ticker) = TICKER.get() {
                 ticker.notify();
             }
@@ -128,7 +165,7 @@ unsafe extern "system" fn handler(control: u32, event_type: u32, event_data: *mu
             }
         }
         SERVICE_CONTROL_INTERROGATE => {
-            report(CURRENT_STATE.load(Ordering::SeqCst), accepted_controls(), 0);
+            report(CURRENT_STATE.load(Ordering::SeqCst), accepted_controls(), 0, 0);
         }
         _ => {
             let _ = event_data;
@@ -143,20 +180,36 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
     if handle.is_null() {
         return;
     }
-    if let Ok(mut guard) = status_handle().lock() {
+    {
+        // 锁中毒时也要写入句柄，否则后续所有状态上报都会静默丢失。
+        let mut guard = status_handle().lock().unwrap_or_else(|err| err.into_inner());
         *guard = handle as usize;
     }
-    report(SERVICE_START_PENDING, 0, 10_000);
+    report(SERVICE_START_PENDING, 0, 10_000, 0);
 
     match start_runtime() {
         Ok(_) => {
-            report(SERVICE_RUNNING, accepted_controls(), 0);
+            // 启动收尾竞态：`start_runtime()` 期间可能已收到 STOP（handler 已上报
+            // STOP_PENDING 并置位 SHUTDOWN）。此时不能再无条件上报 RUNNING，
+            // 否则 SCM 认为 STOP_PENDING、本进程认为 RUNNING，状态分裂。
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                // 保持 STOP_PENDING，直接进入停止流程。
+            } else {
+                report(SERVICE_RUNNING, accepted_controls(), 0, 0);
+                if SHUTDOWN.load(Ordering::SeqCst) {
+                    // 极小窗口：上报 RUNNING 之后、这次检查之前收到 STOP。
+                    // 补报 STOP_PENDING，让状态迁移仍是 RUNNING → STOP_PENDING → STOPPED。
+                    report(SERVICE_STOP_PENDING, 0, 5_000, 0);
+                }
+            }
         }
         Err(err) => {
             if let Some(logger) = LOGGER.get() {
                 logger.error(&format!("服务启动失败：{err}"));
             }
-            report(SERVICE_STOPPED, 0, 0);
+            // 不能只报 STOPPED + NO_ERROR：那样 SCM、`sc query` 与 `net start`
+            // 都会把启动失败当成「正常停止」。用服务自定义错误码上报。
+            report(SERVICE_STOPPED, 0, 0, START_FAILED_EXIT_CODE);
             return;
         }
     }
@@ -165,10 +218,37 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
         thread::sleep(Duration::from_millis(500));
     }
 
+    shutdown_runtime();
+
     if let Some(logger) = LOGGER.get() {
         logger.info("服务已停止");
     }
-    report(SERVICE_STOPPED, 0, 0);
+    report(SERVICE_STOPPED, 0, 0, 0);
+}
+
+/// 停止路径：唤醒工作线程、停用事件订阅，并回收**已经自行结束**的后台线程。
+///
+/// 这里刻意**不**无条件 `join`：`engine::run_worker` 是没有任何退出条件的 `loop {}`
+/// （WFP `Engine` 也只是它的局部变量），`http` / `watch` 线程同样是常驻 `loop`。
+/// 对它们 `join` 会永久阻塞，让 `sc stop` 一直等到 wait hint 超时（1053）。
+/// 因此只对 `is_finished()` 为真的线程做非阻塞回收，其余线程与 WFP 句柄
+/// 交给进程退出时由系统回收（服务进程随后就会结束）。
+fn shutdown_runtime() {
+    if let Some(ticker) = TICKER.get() {
+        ticker.notify();
+    }
+    // ETW：`stop()` 只置位运行标志，不阻塞，`ProcessTrace` 线程随进程退出回收。
+    crate::etw::stop();
+
+    let mut guard = threads().lock().unwrap_or_else(|err| err.into_inner());
+    for handle in guard.drain(..) {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            // 无退出条件 / 仍在运行：drop 句柄即分离，绝不 join（会卡死 SCM）。
+            drop(handle);
+        }
+    }
 }
 
 fn start_runtime() -> io::Result<Arc<Engine>> {
@@ -185,10 +265,13 @@ fn start_runtime() -> io::Result<Arc<Engine>> {
 
     // 启动时先按当前状态套用一次过滤器。
     engine.notify();
-    crate::engine::spawn_worker(Arc::clone(&engine));
+    track(crate::engine::spawn_worker(Arc::clone(&engine)));
 
     match crate::http::spawn(Arc::clone(&engine)) {
-        Ok(_) => logger.info("本地控制台已启动"),
+        Ok(handle) => {
+            track(handle);
+            logger.info("本地控制台已启动");
+        }
         Err(err) => logger.error(&format!("本地控制台启动失败：{err}")),
     }
 
@@ -198,7 +281,10 @@ fn start_runtime() -> io::Result<Arc<Engine>> {
     }
 
     match crate::watch::start(Arc::clone(&engine)) {
-        Ok(_) => logger.info("配置目录监视已启动"),
+        Ok(handle) => {
+            track(handle);
+            logger.info("配置目录监视已启动");
+        }
         Err(err) => logger.warn(&format!("配置目录监视启动失败：{err}")),
     }
 

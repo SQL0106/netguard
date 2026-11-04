@@ -3,3 +3,4 @@
 *.pdb
 *.log
 .agent/win/dist/
+.agent/win/dist*/

@@ -19,7 +19,9 @@ use std::thread;
 use std::time::Duration;
 
 use netguard_core::guard::{basename, hash_reader, HashOutcome};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CANCELLED, ERROR_SUCCESS, HANDLE,
+};
 use windows_sys::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE,
     EVENT_CONTROL_CODE_ENABLE_PROVIDER, PROCESSTRACE_HANDLE,
@@ -78,13 +80,10 @@ fn stop_session(control: u64, properties: &mut [u8]) {
     }
 }
 
-fn start_session() -> io::Result<Session> {
-    let mut name = wide(SESSION_NAME);
-    let mut properties = session_property_buffer();
-    let mut control = CONTROLTRACE_HANDLE { Value: 0 };
-
+/// 初始化实时会话属性缓冲区，返回结构体指针（写入会话名）。
+fn init_session_properties(properties: &mut [u8], name: &[u16]) -> *mut EVENT_TRACE_PROPERTIES {
+    let props = properties.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
     unsafe {
-        let props = properties.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
         (*props).Wnode.BufferSize = properties.len() as u32;
         (*props).Wnode.Flags = 0x0002_0000; // WNODE_FLAG_TRACED_GUID
         (*props).BufferSize = 16;
@@ -98,9 +97,32 @@ fn start_session() -> io::Result<Session> {
         let dest = properties.as_mut_ptr().add(offset) as *mut u16;
         ptr::copy_nonoverlapping(name.as_ptr(), dest, name.len());
     }
+    props
+}
 
-    let code = unsafe { StartTraceW(&mut control, name.as_mut_ptr(), properties.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES) };
-    if code != 0 {
+fn start_session() -> io::Result<Session> {
+    let mut name = wide(SESSION_NAME);
+    let mut properties = session_property_buffer();
+    let mut control = CONTROLTRACE_HANDLE { Value: 0 };
+    let props = init_session_properties(&mut properties, &name);
+
+    let mut code = unsafe { StartTraceW(&mut control, name.as_mut_ptr(), props) };
+    if code == ERROR_ALREADY_EXISTS {
+        // 上次进程被强杀可能留下同名实时会话。先停掉残留会话再重试一次，
+        // 否则守护会因 183 永久起不来（Stop 时 handle 传 0 表示按名字停止）。
+        unsafe {
+            ControlTraceW(
+                CONTROLTRACE_HANDLE { Value: 0 },
+                name.as_mut_ptr(),
+                props,
+                EVENT_TRACE_CONTROL_STOP,
+            );
+        }
+        // ControlTraceW 会把会话属性写回缓冲区，重试前重新初始化一遍。
+        let props = init_session_properties(&mut properties, &name);
+        code = unsafe { StartTraceW(&mut control, name.as_mut_ptr(), props) };
+    }
+    if code != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(code as i32));
     }
 
@@ -269,18 +291,20 @@ pub fn start(engine: Arc<Engine>) -> io::Result<()> {
     }
     let (sender, receiver) = channel();
     let _ = QUEUE.set(sender);
+    let worker_engine = Arc::clone(&engine);
     thread::Builder::new()
         .name("netguard-etw-worker".to_string())
-        .spawn(move || worker(engine, receiver))?;
+        .spawn(move || worker(worker_engine, receiver))?;
 
     thread::Builder::new()
         .name("netguard-etw".to_string())
         .spawn(move || {
+            let logger = engine.logger();
             let session = match start_session() {
                 Ok(session) => session,
                 Err(err) => {
                     RUNNING.store(false, Ordering::SeqCst);
-                    eprintln!("NetGuard：无法启动进程事件订阅：{err}");
+                    logger.error(&format!("无法启动进程事件订阅：{err}"));
                     return;
                 }
             };
@@ -292,16 +316,30 @@ pub fn start(engine: Arc<Engine>) -> io::Result<()> {
             logfile.Anonymous2.EventRecordCallback = Some(on_event);
             let handle = unsafe { OpenTraceW(&mut logfile) };
             if handle.Value == u64::MAX {
+                // 先取 last_os_error：后面 stop_session 的调用会覆盖它。
+                let err = io::Error::last_os_error();
+                // 必须停掉刚建的会话，否则残留会话会让下次启动撞 ERROR_ALREADY_EXISTS。
+                let mut properties = session.properties.clone();
+                stop_session(session.control, &mut properties);
+                logger.error(&format!("无法打开进程事件跟踪：{err}"));
                 RUNNING.store(false, Ordering::SeqCst);
                 return;
             }
+            // 订阅此时已建立；ProcessTrace 会一直阻塞，直到会话被停止才返回。
+            logger.info("进程事件订阅已建立");
+
+            let processing = unsafe {
+                ProcessTrace(&handle as *const PROCESSTRACE_HANDLE, 1, ptr::null(), ptr::null())
+            };
             unsafe {
-                ProcessTrace(&handle as *const PROCESSTRACE_HANDLE, 1, ptr::null(), ptr::null());
                 CloseTrace(handle);
             }
             let mut properties = session.properties.clone();
             stop_session(session.control, &mut properties);
             RUNNING.store(false, Ordering::SeqCst);
+            if processing != ERROR_SUCCESS && processing != ERROR_CANCELLED {
+                logger.error(&format!("进程事件订阅异常结束（{processing}），等待上层重连"));
+            }
         })?;
 
     thread::sleep(Duration::from_millis(50));

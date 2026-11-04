@@ -13,8 +13,10 @@
 发布状态：`v0.1.0` 已于 2026-11-04 发布，附件为 `netguard.exe`、`ngcli.exe`、`install.ps1`、
 `README.md`、`DESIGN.md`。CI 从第四轮起连续全绿，当前无待修编译错误。
 
-唯一未完成的是 Windows 真机验收（详见第六节）：`win`（192.168.1.199）在最近一次检查时离线，
-服务、WFP 过滤器、ETW 订阅都还没有在真实系统上跑过。
+Windows 真机验收进行中（详见第六节与第十节），`win`（192.168.1.199）上已验证：日志出现
+「过滤器已同步：新增 1 条」；名单内 `curl.exe` 访问纯 IP 目标返回 exit 7；非名单程序与 `ping`
+正常；未全局断网。尚待验证：热点共存、时段边界翻转、睡眠唤醒、时钟回拨、登录锁定、
+TOTP 重放、篡改 fail-closed、配置自动重载、`ngcli` 全流程。
 
 ## 二、模块清单
 
@@ -71,7 +73,7 @@
   签名对象是解析后按结构体声明顺序重新序列化的规范字节串，因此缩进与键序不影响校验。
 - 签名不匹配或配置缺失一律 fail-closed：沿用内存中最后一次有效配置，若内存中无有效配置，
   则名单内程序按全天封锁处理，并写入日志、在页面顶部显示告警。
-- 目录 ACL 为 SYSTEM 完全控制、Administrators 只读，普通用户无权写入。
+- 目录 ACL 为 `SYSTEM` 完全控制、`Administrators` 可修改（M），普通用户无权写入。
 - 过滤器为持久化对象，服务停止后拦截依然生效；服务启动时按 Provider 键枚举并与配置求差集。
 - 服务控制权限经 `sc sdset` 收紧，Administrators 无法 `sc stop` 或 `sc delete`。
 
@@ -116,6 +118,8 @@ sed -n '70,450p' .ci.log | sed 's/^Windows 构建（release）\t构建\t[0-9T:.Z
 
 | 提交 | 内容 |
 | --- | --- |
+| `dc40ec5` | 修复：重建非持久化的 Provider 与子层，避免 LIFETIME_MISMATCH |
+| `206ffef` | 文档：新增仓库级 AGENTS.md |
 | `c1a2af8` | 控制台：配置读取不再下发认证字段；新增验收手册 |
 | `42d79f9` | 发布工作流：制品中的可执行文件提到顶层，缺可执行文件时拒绝发布 |
 | `0cddba0` | 文档：新增架构说明 |
@@ -167,6 +171,8 @@ sed -n '70,450p' .ci.log | sed 's/^Windows 构建（release）\t构建\t[0-9T:.Z
 | 日志「同步过滤器失败：枚举模板或订阅将不匹配任何对象」，一条过滤器都建不起来 | `FWP_E_FILTER_NOT_FOUND` 被写成 `0x80320013`（那其实是 `FWP_E_NET_EVENTS_DISABLED`），真正要宽容的 `FWP_E_NEVER_MATCH = 0x80320033` 没有处理，`check()` 直接把「还没有过滤器」当失败 | 常量改为 `0x80320003`，新增 `FWP_E_NEVER_MATCH` 并在枚举入口按空集合处理 | `c557d9f` |
 | 修完上一条后，日志「同步过滤器失败：该调用尝试将两个生存时间不兼容的对象相互关联」（`FWP_E_LIFETIME_MISMATCH = 0x80320016`） | 过滤器是持久化的，但它引用的 Provider 与子层是按会话创建的，生命周期不一致 | `provider.flags = FWPM_PROVIDER_FLAG_PERSISTENT`、`sublayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT` | 本次提交 |
 | 只缺 IPv6 层时会重新添加双栈，产生重复的 IPv4 过滤器且永不清理 | `reconcile` 只判断「两层是否都在」，添加时却总是加两层 | `add_block` 改为 `add_block_layers(path, want_v4, want_v6)`，只补缺失层 | `c557d9f` |
+| 加了 `FWPM_*_FLAG_PERSISTENT` 后仍报「该调用尝试将两个生存时间不兼容的对象相互关联」（`FWP_E_LIFETIME_MISMATCH = 0x80320016`） | 早期版本创建并残留的**非持久化**同名 Provider 与子层仍在；`FwpmProviderAdd0` / `FwpmSubLayerAdd0` 只返回 `FWP_E_ALREADY_EXISTS`，被当成成功，旧对象永远不会被替换 | `wfp.rs::ensure_provider_sublayer` 开头先 `FwpmSubLayerDeleteByKey0` + `FwpmProviderDeleteByKey0`（删除失败一律忽略）再重建 | `dc40ec5` |
+| 名单内 `curl.exe` 访问域名时进程崩溃，退出码 `-1073741819`（`0xC0000005`，崩在 `ntdll.dll +0x649f6`） | DNS 解析被拦，curl 8.13 报 `getaddrinfo() thread failed to start` 后在自身清理阶段崩溃；ETW 已排除（测试配置 `hashes: []`，`handle_start` 在挂起前即 return） | 判定为 curl 自身缺陷，非 NetGuard 逻辑错误：纯 IP 目标与 `--resolve` 均正常返回 exit 7，不在名单的同名副本与 `Invoke-WebRequest` 也正常 | 待记录 |
 
 WFP 错误码对照（`windows-sys` 0.59 的 `Win32::Foundation`，勿凭记忆手抄）：
 
@@ -188,6 +194,11 @@ FWP_E_NEVER_MATCH          0x80320033
 | `http.rs` `Api::new` | 初始化窗口从服务启动计时，重启服务即可重新获得 10 分钟窗口 | 未改，属文档口径问题，验收时按「未初始化且服务刚启动」理解 |
 | `store.rs` `load_state` | `state.json` 解析失败会静默清空水位线与失败计数 | 目录仅 SYSTEM 可写，风险可接受，暂不处理 |
 | `install.ps1 -Uninstall` | 卸载不会删除持久化过滤器，重装前它们仍然生效 | 待办：增加清理入口（见下） |
+| `paths.rs` `ensure` / `harden_acl` | ACL 只在目录原本不存在时才收紧（`%ProgramData%` 默认允许 Users 建目录并取得所有权）；`icacls` 用英文 `Administrators`，非英文系统解析失败 | 改为每次启动都重新收紧；主体改用 SID `*S-1-5-18` / `*S-1-5-32-544`，管理员权限由 RX 提到 M |
+| `etw.rs` 会话建立 | `StartTraceW` 返回 `ERROR_ALREADY_EXISTS(183)` 被当致命；`OpenTraceW` 失败不回收会话（自锁）；`ProcessTrace` 返回值被丢弃 | 183 时先停同名残留会话再重试；`OpenTraceW` 失败先 `stop_session`；检查 `ProcessTrace` 返回值并记日志 |
+| `cli_client.rs` `cookie_path` | 会话 Cookie 写进仅 SYSTEM 可写的 `%ProgramData%\NetGuard`，普通用户 `ngcli login` 必失败 | 改存 `%LOCALAPPDATA%\NetGuard\cli.session`（缺该变量时退回 `%TEMP%`） |
+| `svc.rs` 生命周期 | 启动失败仍上报 `NO_ERROR` 伪装正常停止；STOP 期间启动收尾把 STOP_PENDING 倒灌回 RUNNING；停止路径不回收线程 | 改用 `ERROR_SERVICE_SPECIFIC_ERROR` + `dwServiceSpecificExitCode`；用 `SHUTDOWN` 标志阻止倒灌；只 join `is_finished()` 的线程 |
+| `core/config.rs` `Config.auth`、`engine.rs` 篡改态 | `GET /api/config` 剔除 `auth` 后前端回传，而 `Config.auth` 缺 `#[serde(default)]` → WebUI 保存必然 400；`Tampered/Absent` 时用 `Config::default()` → 删除全部过滤器 + WebUI 免认证（fail-open） | `Config.auth` 与 `AuthConfig.factors` 已加 `#[serde(default)]`（含往返单测）；篡改态改为按 `config.json.bak` 备份封锁、保持 `integrity_ok = false` —— **修复中** |
 
-**当前状态**：签名问题已在真机确认修复（`status` 显示「配置：有效」）；WFP 拦截尚待用带持久化标志
-的构建复验。
+**当前状态**：签名与 WFP 按应用拦截均已在真机确认生效（日志出现「过滤器已同步：新增 N 条」，
+名单内 `curl.exe` 被拦、名单外程序正常）。

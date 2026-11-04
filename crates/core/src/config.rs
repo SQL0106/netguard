@@ -33,6 +33,15 @@ pub struct Config {
     #[serde(default)]
     pub hashes: Vec<String>,
     /// 认证配置。
+    ///
+    /// **必须有 `default`**：`GET /api/config` 为了不把口令散列/动态口令种子下发到浏览器，
+    /// 会把整个 `auth` 键删掉；WebUI 原样回传该对象时若这里要求必填，反序列化会报
+    /// `missing field 'auth'`，导致"保存配置"永远 400。缺省值 = 不带任何认证材料
+    /// （`Factors::None` + 空散列），`PUT` 处理器随后会用当前配置把认证字段回填。
+    ///
+    /// 这不构成降级风险：`auth` 参与 HMAC 覆盖的规范化序列化，磁盘上的配置若被人为删掉
+    /// `auth`，规范化后的字节与签名不匹配，`Store::load` 会判为 `Tampered`。
+    #[serde(default)]
     pub auth: AuthConfig,
 }
 
@@ -262,5 +271,64 @@ mod tests {
     fn 未知字段报错() {
         let bad = br#"{"version":1,"enabled":true,"auth":{"factors":"none"},"typo":1}"#;
         assert!(serde_json::from_slice::<Config>(bad).is_err());
+    }
+
+    #[test]
+    fn 缺少_auth_也能反序列化() {
+        // `GET /api/config` 下发的对象就是这个形状（auth 被删掉）。
+        let raw = br#"{"version":0,"enabled":true,"apps":[],"hashes":[]}"#;
+        let cfg: Config = serde_json::from_slice(raw).unwrap();
+        assert_eq!(cfg.auth.factors, Factors::None);
+        assert_eq!(cfg.auth, AuthConfig::default());
+        assert_eq!(cfg.version, 0);
+        assert!(cfg.enabled);
+        assert!(cfg.apps.is_empty());
+    }
+
+    #[test]
+    fn 前端往返_删掉_auth_后仍可接受() {
+        // 模拟 WebUI：GET 下发的 JSON（无 auth）原样 PUT 回来。
+        let cfg = Config {
+            version: CONFIG_VERSION,
+            enabled: false,
+            apps: vec![AppRule::new("a", "C:\\a\\a.exe", Schedule::always())],
+            hashes: Vec::new(),
+            auth: AuthConfig {
+                factors: Factors::Totp,
+                totp_secret: Some(String::from("JBSWY3DPEHPK3PXP")),
+                failures: 2,
+                ..AuthConfig::default()
+            },
+        };
+        let mut value = serde_json::to_value(&cfg).unwrap();
+        assert!(value.as_object_mut().unwrap().remove("auth").is_some());
+        let back: Config = serde_json::from_value(value).unwrap();
+        // 认证材料随 auth 一起消失（后续由 PUT 处理器从当前配置回填）。
+        assert_eq!(back.auth, AuthConfig::default());
+        assert_eq!(back.auth.factors, Factors::None);
+        // 其余字段必须原样保留。
+        assert!(!back.enabled);
+        assert_eq!(back.apps, cfg.apps);
+        assert_eq!(back.hashes, cfg.hashes);
+        // 缺省认证配置本身必须是合法的（否则 PUT 回填前的 validate 会炸）。
+        back.validate().unwrap();
+    }
+
+    #[test]
+    fn 认证字段可以缺省() {
+        // AuthConfig 内部每个字段都必须能省略（前端回传 / 手工写配置都可能只给一部分）。
+        let auth: AuthConfig = serde_json::from_slice(br#"{}"#).unwrap();
+        assert_eq!(auth.factors, Factors::None);
+        assert!(auth.password_hash.is_none());
+        assert!(auth.totp_secret.is_none());
+        assert!(auth.recovery_hashes.is_empty());
+        assert_eq!(auth.failures, 0);
+        assert!(auth.locked_until.is_none());
+        assert!(auth.last_totp_counter.is_none());
+
+        let auth: AuthConfig = serde_json::from_slice(br#"{"factors":"totp","failures":3}"#).unwrap();
+        assert_eq!(auth.factors, Factors::Totp);
+        assert_eq!(auth.failures, 3);
+        assert!(auth.totp_secret.is_none());
     }
 }

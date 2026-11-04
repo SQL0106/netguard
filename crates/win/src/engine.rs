@@ -75,6 +75,48 @@ struct Inner {
     snapshot: Snapshot,
 }
 
+/// 磁盘配置的「有效」载入结果：主配置不可信时自动退回到上次已知良好的备份。
+///
+/// 单拎成一个枚举而不是 `(Load, bool)` 元组，是为了让 [`Engine::boot`] 与
+/// [`Engine::reload_from_disk`] 被迫对四种情况都作出显式处理，避免两条路径漂移。
+enum Effective {
+    /// 主配置与签名均有效。
+    Trusted(Config),
+    /// 主配置不可信，但备份可用：按备份的内容继续封锁。
+    Backup { config: Config, note: String },
+    /// 主配置与备份都不存在（真正首次安装）。
+    Fresh,
+    /// 主配置与备份都不可信：没有任何可依据的名单。
+    Untrusted(String),
+}
+
+/// 载入当前应采用的配置。
+///
+/// 优先用主配置；它缺失或校验失败时读备份，备份可用就用备份的内容
+/// （`apps`/`hashes`/`auth` 全部来自备份），但调用方必须继续把
+/// `integrity_ok` 置为 `false` —— 即「用最后一份可信名单继续封锁」，
+/// 而不是退化成空名单（那样 worker 会把已有持久化过滤器全删掉，等于解除拦截）。
+fn load_effective(store: &Store) -> Effective {
+    // 「主配置缺失」与「主配置不可信」要分开：前者在备份也缺失时才是首次安装。
+    let (reason, missing) = match store.load() {
+        Load::Ok(config) => return Effective::Trusted(config),
+        Load::Absent => (String::from("配置文件缺失"), true),
+        Load::Tampered(note) => (note, false),
+    };
+    match store.load_backup() {
+        Load::Ok(config) => Effective::Backup {
+            config,
+            note: format!("{reason}；已按上次已知良好的备份封锁"),
+        },
+        // 真首次安装：主配置与备份都不存在。
+        Load::Absent if missing => Effective::Fresh,
+        Load::Absent => Effective::Untrusted(format!("{reason}；没有可用的配置备份")),
+        Load::Tampered(backup_note) => {
+            Effective::Untrusted(format!("{reason}；备份也不可信：{backup_note}"))
+        }
+    }
+}
+
 /// 运行时对象。
 pub struct Engine {
     store: Store,
@@ -90,14 +132,20 @@ impl Engine {
         store.ensure()?;
         let logger = store.logger()?;
 
-        let (config, integrity_ok, integrity_note) = match store.load() {
-            Load::Ok(config) => (config, true, String::new()),
-            Load::Absent => {
+        let (config, integrity_ok, integrity_note) = match load_effective(&store) {
+            Effective::Trusted(config) => (config, true, String::new()),
+            Effective::Backup { config, note } => {
+                logger.error(&format!("配置完整性校验失败：{note}"));
+                logger.warn("按上次已知良好的备份继续封锁；请在 WebUI 中重新保存配置以恢复完整性");
+                (config, false, note)
+            }
+            Effective::Fresh => {
                 logger.warn("尚未初始化：未找到配置，暂不拦截任何应用");
                 (Config::default(), true, String::from("尚未初始化"))
             }
-            Load::Tampered(note) => {
+            Effective::Untrusted(note) => {
                 logger.error(&format!("配置校验失败：{note}"));
+                logger.error("没有任何可信配置，保留已有过滤器（不做增删）");
                 (Config::default(), false, note)
             }
         };
@@ -168,10 +216,11 @@ impl Engine {
     /// 仅从磁盘重新读取配置与签名，不写回。
     ///
     /// 供数据目录监视器使用：外部（例如安装脚本或其他管理工具）替换配置后立即生效。
-    /// 校验失败时按失效即封锁处理，并保留快照中的旧配置用于显示。
+    /// 校验失败时按失效即封锁处理：主配置不可信则改用上次已知良好的备份（见
+    /// [`load_effective`]），两者都不可信时保留快照中的旧配置与名单用于显示。
     pub fn reload_from_disk(&self) -> Reload {
-        match self.store.load() {
-            Load::Ok(config) => {
+        match load_effective(&self.store) {
+            Effective::Trusted(config) => {
                 {
                     let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
                     guard.snapshot.config = config;
@@ -182,7 +231,22 @@ impl Engine {
                 self.notify();
                 Reload::Applied
             }
-            Load::Absent => {
+            Effective::Backup { config, note } => {
+                {
+                    let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+                    // 用备份的名单继续封锁，但绝不能把完整性标成通过。
+                    guard.snapshot.config = config;
+                    guard.snapshot.integrity_ok = false;
+                    guard.snapshot.integrity_note = note.clone();
+                }
+                self.logger
+                    .error(&format!("配置完整性校验失败：{note}"));
+                self.logger
+                    .warn("按上次已知良好的备份继续封锁；请在 WebUI 中重新保存配置以恢复完整性");
+                self.notify();
+                Reload::Tampered(note)
+            }
+            Effective::Fresh => {
                 {
                     let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
                     guard.snapshot.integrity_ok = false;
@@ -192,13 +256,15 @@ impl Engine {
                 self.notify();
                 Reload::Tampered(String::from("配置文件缺失"))
             }
-            Load::Tampered(note) => {
+            Effective::Untrusted(note) => {
                 {
                     let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
                     guard.snapshot.integrity_ok = false;
                     guard.snapshot.integrity_note = note.clone();
                 }
-                self.logger.error(&format!("配置文件校验失败：{note}"));
+                self.logger
+                    .error(&format!("配置完整性校验失败：{note}"));
+                self.logger.error("没有任何可信配置，保留已有过滤器（不做增删）");
                 self.notify();
                 Reload::Tampered(note)
             }
@@ -298,7 +364,15 @@ impl Engine {
             }
             let signature = (snapshot.integrity_ok, blocked.clone());
 
-            if last_signature.as_ref() != Some(&signature) {
+            // 没有任何可信名单（配置与备份都不可信）时不要去 reconcile 空集合：
+            // `reconcile(&[])` 会把已有持久化过滤器逐条删掉，等于把拦截解除。
+            // 这里保持现有过滤器不动，等配置恢复后下一轮再同步；不记 `last_signature`，
+            // 所以配置一恢复就会立即重算。
+            if !snapshot.integrity_ok && blocked.is_empty() {
+                self.logger
+                    .warn("没有可信配置，保留已有过滤器不做增删（fail-closed）");
+                self.commit(&evaluation, &blocked, None);
+            } else if last_signature.as_ref() != Some(&signature) {
                 if engine.is_none() {
                     engine = match wfp::open_logged(&self.logger) {
                         Ok(found) => Some(found),

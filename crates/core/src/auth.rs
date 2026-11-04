@@ -63,6 +63,8 @@ impl Factors {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
+    /// 启用哪些因子。缺省 = 不需要认证（与 [`Factors::default`] 一致）。
+    #[serde(default)]
     pub factors: Factors,
     /// Argon2id PHC 字符串。
     #[serde(default)]

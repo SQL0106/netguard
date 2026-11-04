@@ -21,8 +21,48 @@ ngcli —— NetGuard 命令行客户端
   ngcli help
 ";
 
+/// 会话 Cookie 的本地路径。
+///
+/// 不能放进 `%ProgramData%\NetGuard`：该目录自 v0.1.0 起只为 SYSTEM 开放写入（见 `paths.rs`
+/// 的目录收紧），普通用户执行 `ngcli login` 必然 Access Denied。改为**每用户一份**：
+/// 优先 `%LOCALAPPDATA%\NetGuard\cli.session`，缺 `LOCALAPPDATA` 时退回
+/// `%TEMP%\NetGuard\cli.session`，两者都没有则退回当前目录。
+///
+/// `%LOCALAPPDATA%` 与 `%TEMP%` 都继承当前用户的目录 ACL，只能本用户读写，
+/// 因此不需要再额外设 ACL。
 fn cookie_path() -> std::path::PathBuf {
-    crate::paths::Paths::new().file("cli.session")
+    const FILE_NAME: &str = "cli.session";
+
+    for key in ["LOCALAPPDATA", "TEMP"] {
+        if let Some(base) = std::env::var_os(key) {
+            let base = std::path::PathBuf::from(base);
+            if !base.as_os_str().is_empty() {
+                return base.join("NetGuard").join(FILE_NAME);
+            }
+        }
+    }
+
+    match std::env::current_dir() {
+        Ok(dir) => dir.join(FILE_NAME),
+        Err(_) => std::path::PathBuf::from(FILE_NAME),
+    }
+}
+
+/// 把会话 Cookie 写到 `cookie_path()`，必要时先建父目录。
+fn save_cookie(pair: &str) -> io::Result<std::path::PathBuf> {
+    let path = cookie_path();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            match std::fs::create_dir_all(parent) {
+                Ok(()) => {}
+                // 目录已存在（并发下 `create_dir_all` 也可能报 AlreadyExists）不算错误。
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    std::fs::write(&path, pair.as_bytes())?;
+    Ok(path)
 }
 
 fn read_cookie() -> Option<String> {
@@ -162,11 +202,8 @@ pub fn client() -> io::Result<()> {
             ensure_ok(&response)?;
             match response.cookie {
                 Some(pair) => {
-                    let path = cookie_path();
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    std::fs::write(&path, pair.as_bytes())?;
+                    // Cookie 落在用户自己的目录，写不进去是真错误（例如磁盘满），照旧上报。
+                    let path = save_cookie(&pair)?;
                     println!("已登录，会话保存在 {}", path.display());
                 }
                 None => println!("已登录，但服务未返回会话"),

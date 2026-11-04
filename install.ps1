@@ -157,7 +157,9 @@ function Install-Service {
     if (Test-Path $cliSource) { Copy-Item -Force $cliSource (Join-Path $InstallDir 'ngcli.exe') }
 
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-    & icacls $DataDir /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)RX' | Out-Null
+    # 主体用 SID 而不是英文账户名，否则非英文 Windows 上 icacls 会因找不到账户而失败。
+    # 与 crates/win/src/paths.rs 的 harden_acl 保持一致：SYSTEM 完全控制、Administrators 修改。
+    & icacls $DataDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)M' | Out-Null
 
     Write-Step '正在注册服务。'
     $binary = '"' + $exe + '" service'
@@ -175,7 +177,8 @@ function Install-Service {
 }
 
 function Lock-ServiceControl {
-    # 仅授予 SYSTEM 启停与配置权限；Administrators 保留读取，避免随手停止或删除。
+    # 仅授予 SYSTEM 启停与配置权限；Administrators 在服务控制层面只保留查询（不含启停与删除），
+    # 避免随手停止或删除。（与 Install-Service 里数据目录 ACL 的 M 权限是两回事。）
     $sddl = 'D:(A;;SDWDCCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)'
     & sc.exe sdset $ServiceName $sddl | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Step '警告：收紧服务控制权限失败。' }
@@ -198,9 +201,10 @@ function Resolve-Secret {
 function Invoke-Setup {
     $exe = Join-Path $InstallDir 'netguard.exe'
     $preseedPath = Join-Path $DataDir 'preseed.json'
-    # 数据目录此前已被收紧为 Administrators 只读，而初始化要以管理员身份写入
-    # config.json / config.mac / secret.key，因此在这一步临时放开，结束后收回。
-    & icacls $DataDir /grant:r 'Administrators:(OI)(CI)F' | Out-Null
+    # 数据目录默认已收紧为 SYSTEM 完全控制、Administrators 修改（M），而初始化要以管理员
+    # 身份写入 config.json / config.mac / secret.key，部分写入路径还需要完全控制，因此这里
+    # 临时提高到 F，结束后收回 M（不是 RX）。
+    & icacls $DataDir /grant:r '*S-1-5-32-544:(OI)(CI)F' | Out-Null
     $effectiveFactors = $Factors
     if ($effectiveFactors -eq 'pw') { $effectiveFactors = 'password' }
 
@@ -238,7 +242,7 @@ function Invoke-Setup {
     Write-Step '正在执行初始化。'
     $process = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru -NoNewWindow
     Remove-Item -LiteralPath $preseedPath -Force -ErrorAction SilentlyContinue
-    & icacls $DataDir /grant:r 'Administrators:(OI)(CI)RX' | Out-Null
+    & icacls $DataDir /grant:r '*S-1-5-32-544:(OI)(CI)M' | Out-Null
     if ($process.ExitCode -ne 0) { Fail $process.ExitCode '初始化失败，详见数据目录中的日志。' }
     Write-Step '初始化完成。'
 }

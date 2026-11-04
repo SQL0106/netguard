@@ -84,26 +84,26 @@ impl Paths {
 
     /// 创建目录并收紧访问控制。
     ///
-    /// 目录新建时只允许 `SYSTEM` 完全控制、`Administrators` 读取与执行，
-    /// 关闭继承以避免普通用户获得访问权。已存在的目录不重复设置，
-    /// 以免覆盖运维人员的调整。
+    /// 只允许 `SYSTEM` 完全控制、`Administrators` 读取与执行，并关闭继承。
+    /// 无论目录是否早已存在都重新收紧：`%ProgramData%` 默认允许 `Users` 创建目录并
+    /// 取得所有权，若只在「新建时」设置一次，普通用户可以抢先建好同名的宽松目录，
+    /// 服务随后沿用它，等于绕过了整条完整性防线。
     pub fn ensure(&self) -> io::Result<()> {
-        let existed = self.dir.exists();
         std::fs::create_dir_all(&self.dir)?;
-        if !existed {
-            self.harden_acl()?;
-        }
-        Ok(())
+        self.harden_acl()
     }
 
     /// 用 `icacls` 收紧目录权限。
+    ///
+    /// 主体一律用 SID 而不是英文账户名，否则非英文 Windows 上 `icacls` 会因找不到
+    /// `Administrators` 而失败，服务起不来。
     pub fn harden_acl(&self) -> io::Result<()> {
         let status = Command::new("icacls")
             .arg(&self.dir)
             .arg("/inheritance:r")
             .arg("/grant:r")
-            .arg("SYSTEM:(OI)(CI)F")
-            .arg("Administrators:(OI)(CI)RX")
+            .arg("*S-1-5-18:(OI)(CI)F")
+            .arg("*S-1-5-32-544:(OI)(CI)M")
             .status()?;
         if status.success() {
             Ok(())
