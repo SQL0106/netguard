@@ -197,6 +197,11 @@ fn start_runtime() -> io::Result<Arc<Engine>> {
         Err(err) => logger.warn(&format!("进程哈希守护启动失败：{err}")),
     }
 
+    match crate::watch::start(Arc::clone(&engine)) {
+        Ok(_) => logger.info("配置目录监视已启动"),
+        Err(err) => logger.warn(&format!("配置目录监视启动失败：{err}")),
+    }
+
     let snapshot = engine.snapshot();
     let evaluation = evaluate(
         &snapshot.config,

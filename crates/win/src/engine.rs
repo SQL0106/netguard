@@ -57,6 +57,15 @@ impl Snapshot {
     }
 }
 
+/// 磁盘重载的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reload {
+    /// 已成功应用新配置。
+    Applied,
+    /// 配置缺失或校验失败，已转为封锁状态。
+    Tampered(String),
+}
+
 struct Inner {
     snapshot: Snapshot,
 }
@@ -149,6 +158,46 @@ impl Engine {
         self.logger.info("配置已更新");
         self.notify();
         Ok(())
+    }
+
+    /// 仅从磁盘重新读取配置与签名，不写回。
+    ///
+    /// 供数据目录监视器使用：外部（例如安装脚本或其他管理工具）替换配置后立即生效。
+    /// 校验失败时按失效即封锁处理，并保留快照中的旧配置用于显示。
+    pub fn reload_from_disk(&self) -> Reload {
+        match self.store.load() {
+            Load::Ok(config) => {
+                {
+                    let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+                    guard.snapshot.config = config;
+                    guard.snapshot.integrity_ok = true;
+                    guard.snapshot.integrity_note.clear();
+                }
+                self.logger.info("检测到配置变更，已从磁盘重新载入");
+                self.notify();
+                Reload::Applied
+            }
+            Load::Absent => {
+                {
+                    let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+                    guard.snapshot.integrity_ok = false;
+                    guard.snapshot.integrity_note = String::from("配置文件缺失");
+                }
+                self.logger.error("配置文件缺失，按失效即封锁处理");
+                self.notify();
+                Reload::Tampered(String::from("配置文件缺失"))
+            }
+            Load::Tampered(note) => {
+                {
+                    let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+                    guard.snapshot.integrity_ok = false;
+                    guard.snapshot.integrity_note = note.clone();
+                }
+                self.logger.error(&format!("配置文件校验失败：{note}"));
+                self.notify();
+                Reload::Tampered(note)
+            }
+        }
     }
 
     /// 临时放行指定分钟数；`0` 表示立即取消放行。

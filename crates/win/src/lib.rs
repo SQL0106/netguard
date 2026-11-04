@@ -36,6 +36,8 @@ pub mod store;
 #[cfg(windows)]
 pub mod ticker;
 #[cfg(windows)]
+pub mod watch;
+#[cfg(windows)]
 pub mod wfp;
 
 /// 进程入口。
