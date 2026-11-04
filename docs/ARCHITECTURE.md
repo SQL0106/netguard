@@ -154,6 +154,9 @@ README 里也是这个口径：本程序提高自我约束成本，不是强制�
   改配置、临时放行、重生成 TOTP 等要求 **5 分钟内的提升验证**，否则要当场再输一次凭据。
 - 接口只有九个：`/api/{state,config,log,setup,login,logout,override,totp}`，全部走 JSON，
   静态页 `include_bytes!` 编进可执行文件，没有前端构建步骤。
+- 认证材料不出服务端进程：`GET /api/config` 把配置序列化成 JSON 之后先删除 `auth` 字段再下发，
+  口令散列、动态口令种子、恢复码散列只存在于 `C:\ProgramData\NetGuard\config.json` 与服务内存里。
+  保存配置时由 `PUT /api/config` 从当前配置回填这些字段，因此浏览器不需要（也拿不到）它们。
 
 请求体里口令字段统一叫 `pw`（历史原因：编辑链路的脱敏插件会把 `password: 值` 形态就地改写，
 这条约定在源码里必须保持）。
