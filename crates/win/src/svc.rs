@@ -44,7 +44,7 @@ static CURRENT_STATE: AtomicU32 = AtomicU32::new(SERVICE_START_PENDING);
 static STATUS_HANDLE: OnceLock<Mutex<usize>> = OnceLock::new();
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static TICKER: OnceLock<Ticker> = OnceLock::new();
-static LOGGER: OnceLock<Logger> = OnceLock::new();
+static LOGGER: OnceLock<std::sync::Arc<Logger>> = OnceLock::new();
 
 fn status_handle() -> &'static Mutex<usize> {
     STATUS_HANDLE.get_or_init(|| Mutex::new(0))
@@ -144,7 +144,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
         return;
     }
     if let Ok(mut guard) = status_handle().lock() {
-        *guard = handle;
+        *guard = handle as usize;
     }
     report(SERVICE_START_PENDING, 0, 10_000);
 
@@ -175,6 +175,7 @@ fn start_runtime() -> io::Result<Arc<Engine>> {
     let store = Store::open_default();
     store.ensure()?;
     let logger = store.logger()?;
+    let logger = std::sync::Arc::new(logger);
     let _ = LOGGER.set(logger.clone());
     logger.info("NetGuard 服务正在启动");
 
@@ -197,7 +198,11 @@ fn start_runtime() -> io::Result<Arc<Engine>> {
     }
 
     let snapshot = engine.snapshot();
-    let evaluation = evaluate(&snapshot.config, chrono::Local::now().timestamp(), crate::engine::override_deadline(snapshot.state.override_until));
+    let evaluation = evaluate(
+        &snapshot.config,
+        chrono::Local::now().naive_local(),
+        crate::engine::override_deadline(snapshot.state.override_until),
+    );
     if evaluation.blocked {
         let count = evaluation.paths.len();
         logger.info(&format!("启动时处于拦截时段，当前拦截 {count} 个应用"));

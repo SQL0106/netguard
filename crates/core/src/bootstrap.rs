@@ -176,7 +176,7 @@ pub fn build(preseed: &PreSeed) -> Result<Bootstrap, BootstrapError> {
         (codes, hashes)
     };
 
-    let mut config = Config {
+    let config = Config {
         version: CONFIG_VERSION,
         enabled: preseed.enabled,
         apps: preseed.apps.clone(),

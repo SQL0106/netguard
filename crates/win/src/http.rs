@@ -22,6 +22,7 @@ use crate::engine::Engine;
 use crate::endpoint;
 use crate::session::{self, Sessions};
 
+const COOKIE_NAME: &str = "ng_session";
 const MAX_BODY: usize = 1 << 20;
 const SETUP_WINDOW_SECS: i64 = 600;
 
