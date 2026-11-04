@@ -114,7 +114,7 @@ impl Engine {
             provider.providerKey = PROVIDER_KEY;
             provider.displayData.name = provider_name.as_mut_ptr();
             provider.displayData.description = provider_desc.as_mut_ptr();
-            let code = wfp::FwpmProviderAdd0(self.handle, &provider, ptr::null());
+            let code = wfp::FwpmProviderAdd0(self.handle, &provider, ptr::null_mut());
             if code != ERROR_SUCCESS && code as i32 != ERROR_ALREADY_EXISTS {
                 return check(code);
             }
@@ -128,7 +128,7 @@ impl Engine {
             sublayer.displayData.description = sub_desc.as_mut_ptr();
             sublayer.providerKey = &mut provider_key as *mut GUID;
             sublayer.weight = u16::MAX;
-            let code = wfp::FwpmSubLayerAdd0(self.handle, &sublayer, ptr::null());
+            let code = wfp::FwpmSubLayerAdd0(self.handle, &sublayer, ptr::null_mut());
             if code != ERROR_SUCCESS && code as i32 != ERROR_ALREADY_EXISTS {
                 return check(code);
             }
@@ -194,7 +194,7 @@ impl Engine {
         filter.flags = wfp::FWPM_FILTER_FLAG_PERSISTENT;
 
         let mut id: u64 = 0;
-        let code = wfp::FwpmFilterAdd0(self.handle, &filter, ptr::null(), &mut id);
+        let code = wfp::FwpmFilterAdd0(self.handle, &filter, ptr::null_mut(), &mut id);
         check(code)?;
         Ok(id)
     }

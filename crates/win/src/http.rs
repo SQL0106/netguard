@@ -7,14 +7,13 @@
 #![cfg(windows)]
 
 use std::io;
-use std::io::Read;
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tiny_http::{Header, Request, Response, Server};
 
 use netguard_core::bootstrap::{self, PreSeed};
 use netguard_core::{auth, totp, Factors};
@@ -98,7 +97,7 @@ fn ok(message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
 
 fn read_body(request: &mut Request) -> Result<Vec<u8>, String> {
     let mut buffer = Vec::new();
-    let mut reader = request.as_reader();
+    let reader = request.as_reader();
     let mut chunk = [0u8; 8192];
     loop {
         match reader.read(&mut chunk) {
@@ -125,7 +124,7 @@ fn parse_body<T: for<'de> Deserialize<'de>>(request: &mut Request) -> Result<T, 
 
 fn session_id(request: &Request) -> Option<String> {
     for item in request.headers() {
-        if item.field.as_str().eq_ignore_ascii_case("cookie") {
+        if item.field.as_str().as_str().eq_ignore_ascii_case("cookie") {
             if let Some(value) = session::cookie_value(item.value.as_str(), session::COOKIE_NAME) {
                 return Some(value.to_string());
             }
@@ -449,10 +448,10 @@ fn handle_totp(api: &Api, request: &mut Request) -> Response<std::io::Cursor<Vec
     let result: Result<(), String> = (|| {
         if body.regenerate_totp {
             if config.auth.factors.needs_totp() {
-                let secret = auth::new_totp_secret();
+                let secret = auth::new_totp_secret().map_err(|e| e.to_string())?;
                 uri = totp::otpauth_url(&secret, "NetGuard", "NetGuard");
                 config.auth.totp_secret = Some(secret);
-                let fresh = auth::new_recovery_codes(auth::RECOVERY_CODE_COUNT);
+                let fresh = auth::new_recovery_codes(auth::RECOVERY_CODE_COUNT).map_err(|e| e.to_string())?;
                 config.auth.recovery_hashes = fresh
                     .iter()
                     .map(|code| auth::hash_password(code))
@@ -462,7 +461,7 @@ fn handle_totp(api: &Api, request: &mut Request) -> Response<std::io::Cursor<Vec
             }
         }
         if body.regenerate_recovery && codes.is_empty() {
-            let fresh = auth::new_recovery_codes(auth::RECOVERY_CODE_COUNT);
+            let fresh = auth::new_recovery_codes(auth::RECOVERY_CODE_COUNT).map_err(|e| e.to_string())?;
             config.auth.recovery_hashes = fresh
                 .iter()
                 .map(|code| auth::hash_password(code))
@@ -529,8 +528,7 @@ fn handle_log(api: &Api, request: &Request) -> Response<std::io::Cursor<Vec<u8>>
         }
     }
     let text = api.engine.logger().tail(lines);
-    let payload: Vec<&str> = text.lines().collect();
-    respond_json(&json!({ "lines": payload }), 200, None)
+    respond_json(&json!({ "lines": text }), 200, None)
 }
 
 fn handle_logout(api: &Api, request: &Request) -> Response<std::io::Cursor<Vec<u8>>> {

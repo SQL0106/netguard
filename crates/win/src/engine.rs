@@ -74,7 +74,7 @@ impl Engine {
     /// 载入配置并构造运行时。不会在此阶段访问过滤器引擎。
     pub fn boot(store: Store) -> std::io::Result<Arc<Engine>> {
         store.ensure()?;
-        let logger = store.logger();
+        let logger = store.logger()?;
 
         let (config, integrity_ok, integrity_note) = match store.load() {
             Load::Ok(config) => (config, true, String::new()),
@@ -90,7 +90,7 @@ impl Engine {
 
         let state = store.load_state();
         let now = chrono::Local::now().naive_local();
-        let evaluation = evaluate(&config, now, state.override_until);
+        let evaluation = evaluate(&config, now, override_deadline(state.override_until));
 
         let engine = Arc::new(Engine {
             store,
@@ -201,7 +201,7 @@ impl Engine {
         loop {
             let snapshot = self.snapshot();
             let now = chrono::Local::now().naive_local();
-            let evaluation = evaluate(&snapshot.config, now, snapshot.state.override_until);
+            let evaluation = evaluate(&snapshot.config, now, override_deadline(snapshot.state.override_until));
             let mut blocked = if snapshot.integrity_ok {
                 evaluation.paths.clone()
             } else {
@@ -327,6 +327,13 @@ pub fn spawn_worker(engine: Arc<Engine>) -> std::thread::JoinHandle<()> {
 /// 把本地时间（无时区）转换为带时区时刻。
 ///
 /// 夏令时跳变导致该本地时间不存在时，顺延一小时；歧义（回拨）取较早者。
+fn override_deadline(stamp: Option<i64>) -> Option<chrono::NaiveDateTime> {
+    use chrono::TimeZone;
+    stamp
+        .and_then(|value| chrono::Local.timestamp_opt(value, 0).single())
+        .map(|value| value.naive_local())
+}
+
 fn local_from_naive(naive: chrono::NaiveDateTime) -> Option<chrono::DateTime<chrono::Local>> {
     use chrono::TimeZone;
     match chrono::Local.from_local_datetime(&naive) {

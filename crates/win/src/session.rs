@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn 解析 Cookie() {
+    fn 解析_cookie() {
         assert_eq!(cookie_value("a=1; ng_session=abc; b=2", "ng_session"), Some("abc"));
         assert_eq!(cookie_value("a=1", "ng_session"), None);
     }
