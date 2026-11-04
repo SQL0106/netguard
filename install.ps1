@@ -74,6 +74,8 @@ param(
     [switch]$NoStart,
     [switch]$Force,
     [string]$InstallDir,
+    [string]$TimeSource = 'ntp.aliyun.com',
+    [switch]$NoTimeSync,
     [switch]$Uninstall,
     [switch]$Purge
 )
@@ -226,6 +228,29 @@ function Remove-Installation {
     }
 }
 
+function Set-TimeSource {
+    if ($NoTimeSync -or -not $TimeSource) {
+        Write-Step '按参数跳过时间源配置。'
+        return
+    }
+    try {
+        $peers = ($TimeSource.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) |
+            ForEach-Object { $_ + ',0x9' }
+        if (-not $peers) { return }
+        Write-Step ('正在把系统时间源设置为 ' + $TimeSource + '。')
+        & sc.exe config w32time start= auto | Out-Null
+        & w32tm.exe /config /syncfromflags:manual ('/manualpeerlist:' + ($peers -join ' ')) /update | Out-Null
+        Restart-Service -Name w32time -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+        $resync = & w32tm.exe /resync /force 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Step ('警告：立即同步未成功，稍后系统会自动重试。' + ($resync -join ' '))
+        }
+    } catch {
+        Write-Step ('警告：配置时间源失败：' + $_.Exception.Message)
+    }
+}
+
 # ---------------------------------------------------------------- 主流程
 
 Assert-Administrator
@@ -237,6 +262,7 @@ if ($Uninstall) {
 
 Install-Service
 Lock-ServiceControl
+Set-TimeSource
 
 $needSetup = $Config -or $Factors -or $Password -or $PasswordFile -or $PasswordStdin -or $TotpSecret
 if ($needSetup) {
