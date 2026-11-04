@@ -247,10 +247,45 @@ function Invoke-Setup {
     Write-Step '初始化完成。'
 }
 
+function Invoke-WfpPurge {
+    # 过滤器带 FWPM_FILTER_FLAG_PERSISTENT，删掉服务与文件之后仍留在内核里继续阻断流量，
+    # 重装时还会与旧对象同名冲突（旧版本残留的非持久化 Provider / 子层曾触发
+    # FWP_E_LIFETIME_MISMATCH），因此卸载必须显式清理：过滤器 → 子层 → Provider。
+    # 调用前提是服务已停止 —— 运行中的服务会立刻 reconcile 把过滤器重建回来。
+    $svc = Get-Service-State $ServiceName
+    if ($svc -and $svc.Status -ne 'Stopped') {
+        Write-Step ('警告：服务仍未停止（' + $svc.Status + '），跳过 WFP 过滤器清理。')
+        return
+    }
+    $exe = Join-Path $InstallDir 'netguard.exe'
+    if (-not (Test-Path -LiteralPath $exe)) {
+        Write-Step "警告：未找到 $exe，跳过 WFP 过滤器清理。"
+        return
+    }
+    Write-Step '正在清理 WFP 持久化过滤器。'
+    & $exe 'wfp-purge'
+    if ($LASTEXITCODE -ne 0) {
+        # 清理失败不阻断卸载，但要让用户看到残留风险。
+        Write-Step ('警告：WFP 过滤器清理失败（退出码 ' + $LASTEXITCODE + '），继续卸载。')
+    }
+}
+
 function Remove-Installation {
     $svc = Get-Service-State $ServiceName
     if ($svc) {
-        Invoke-AsSystem ('& sc.exe stop ' + $ServiceName + ' 2>&1 | Out-Null; Start-Sleep -Milliseconds 800; & sc.exe delete ' + $ServiceName + ' 2>&1 | Out-Null') 'delete'
+        # 服务控制权限只留给 SYSTEM，停服务同样要经 SYSTEM 计划任务；
+        # 这里只停不删，等过滤器清理完成后再删除服务。
+        Invoke-AsSystem ('& sc.exe stop ' + $ServiceName + ' 2>&1 | Out-Null') 'stop'
+        for ($i = 0; $i -lt 40; $i++) {
+            $svc = Get-Service-State $ServiceName
+            if (-not $svc -or $svc.Status -eq 'Stopped') { break }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    # 必须先停服务再 purge：服务在跑时会持续 reconcile，删除的过滤器会被立刻重建。
+    Invoke-WfpPurge
+    if (Get-Service-State $ServiceName) {
+        Invoke-AsSystem ('& sc.exe delete ' + $ServiceName + ' 2>&1 | Out-Null') 'delete'
         for ($i = 0; $i -lt 20; $i++) {
             if (-not (Get-Service-State $ServiceName)) { break }
             Start-Sleep -Milliseconds 500

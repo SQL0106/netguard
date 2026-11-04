@@ -35,6 +35,8 @@ const FWP_E_NEVER_MATCH: u32 = 0x8032_0033;
 
 const NAME_V4: &str = "ng4|";
 const NAME_V6: &str = "ng6|";
+/// 每次 `FwpmFilterEnum0` 请求的最大条数。返回条数小于该值即表示已到末尾。
+const ENUM_BATCH: u32 = 32;
 
 const fn guid(data1: u32, data2: u16, data3: u16, data4: [u8; 8]) -> GUID {
     GUID {
@@ -94,6 +96,8 @@ pub struct ReconcileReport {
     pub added: usize,
     pub removed: usize,
     pub kept: usize,
+    /// 本次枚举到的既有过滤器条数（去重前）。仅用于日志观测，不参与协调判断。
+    pub observed: usize,
 }
 
 /// WFP 引擎句柄。
@@ -247,84 +251,176 @@ impl Engine {
         }
     }
 
-    /// 枚举本程序的全部过滤器。
+    /// 枚举本程序的全部过滤器（按 IPv4 / IPv6 两个层分别枚举）。
+    ///
+    /// 这里不能只把 `providerKey` 填进一个 `zeroed()` 的模板：`actionMask` 的语义是
+    /// 「过滤器的动作类型与掩码按位与后至少有一位非零才返回」，`actionMask == 0` 与任何
+    /// 动作类型相与都是 0，结果一条也枚举不到，`existing()` 永远返回空集合，
+    /// `reconcile()` 于是每启动一次就再补一对，持久化过滤器无限累积。
+    /// 依据（MSDN，FWPM_FILTER_ENUM_TEMPLATE0 / actionMask）：
+    /// "Only filters whose action type contains at least one of the bits in actionMask
+    /// will be returned" … "0xFFFFFFFF | Ignore the filter's action type when enumerating".
+    ///
+    /// 同理 `layerKey` 留零 GUID 的语义文档未定义，所以显式按两个层分别枚举，
+    /// 不依赖「零 GUID = 全部层」这类未写明的行为。
     pub fn existing(&self) -> io::Result<Vec<Existing>> {
-        let mut template: wfp::FWPM_FILTER_ENUM_TEMPLATE0 = unsafe { std::mem::zeroed() };
+        let mut found = Vec::new();
+        for (layer, ipv6) in [
+            (wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V4, false),
+            (wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V6, true),
+        ] {
+            let items = unsafe { self.enumerate_layer(layer, ipv6)? };
+            found.extend(items);
+        }
+        Ok(found)
+    }
+
+    /// 枚举某一层上属于本 Provider 的过滤器。
+    unsafe fn enumerate_layer(&self, layer: GUID, ipv6: bool) -> io::Result<Vec<Existing>> {
         let mut provider_key = PROVIDER_KEY;
-        template.providerKey = &mut provider_key as *mut GUID;
+        let mut template: wfp::FWPM_FILTER_ENUM_TEMPLATE0 = std::mem::zeroed();
+        template.providerKey = &mut provider_key;
+        template.layerKey = layer;
+        // 0 == FWP_FILTER_ENUM_FULLY_CONTAINED：模板条件为空时即「该层内全部过滤器」。
+        template.enumType = wfp::FWP_FILTER_ENUM_FULLY_CONTAINED;
+        template.flags = 0;
+        // MSDN：If zero, then all filters match。
+        template.numFilterConditions = 0;
+        template.filterCondition = ptr::null_mut();
+        // 全 1 = 忽略动作类型；留 0 会一条都枚举不到（本次故障的根因）。
+        template.actionMask = u32::MAX;
+        // 只在按 callout 枚举时才需要，否则必须为空。
+        template.calloutKey = ptr::null_mut();
 
-        unsafe {
-            let mut enum_handle: HANDLE = std::mem::zeroed();
-            let code = wfp::FwpmFilterCreateEnumHandle0(self.handle, &template, &mut enum_handle);
-            if code == FWP_E_FILTER_NOT_FOUND || code == FWP_E_NEVER_MATCH {
-                // 一条过滤器都还没有：空集合，不是错误。
-                return Ok(Vec::new());
+        let mut enum_handle: HANDLE = std::mem::zeroed();
+        let code = wfp::FwpmFilterCreateEnumHandle0(self.handle, &template, &mut enum_handle);
+        if code == FWP_E_FILTER_NOT_FOUND || code == FWP_E_NEVER_MATCH {
+            // 该层上一条都没有：空集合，不是错误。
+            return Ok(Vec::new());
+        }
+        check(code)?;
+        if enum_handle.is_null() {
+            return Ok(Vec::new());
+        }
+
+        let mut found = Vec::new();
+        let mut failure: Option<u32> = None;
+        loop {
+            let mut entries: *mut *mut wfp::FWPM_FILTER0 = ptr::null_mut();
+            let mut returned: u32 = 0;
+            let code = wfp::FwpmFilterEnum0(self.handle, enum_handle, ENUM_BATCH, &mut entries, &mut returned);
+            if code != ERROR_SUCCESS {
+                if !entries.is_null() {
+                    wfp::FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut c_void);
+                }
+                // 枚举到末尾时 WFP 用「找不到」表达，属正常结束；其它错误必须上报，
+                // 否则会被当成空集合，再次退化成「每次启动都重加一对」。
+                if code != FWP_E_FILTER_NOT_FOUND && code != FWP_E_NEVER_MATCH {
+                    failure = Some(code);
+                }
+                break;
             }
-            check(code)?;
-
-            let mut found = Vec::new();
-            loop {
-                let mut entries: *mut *mut wfp::FWPM_FILTER0 = ptr::null_mut();
-                let mut returned: u32 = 0;
-                let code = wfp::FwpmFilterEnum0(self.handle, enum_handle, 32, &mut entries, &mut returned);
-                if code != ERROR_SUCCESS || returned == 0 {
-                    if !entries.is_null() {
-                        wfp::FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut c_void);
-                    }
-                    break;
+            if entries.is_null() || returned == 0 {
+                if !entries.is_null() {
+                    wfp::FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut c_void);
                 }
-                for index in 0..returned as usize {
-                    let entry = *entries.add(index);
-                    if entry.is_null() {
-                        continue;
-                    }
-                    let name = read_wide((*entry).displayData.name);
-                    let (ipv6, path) = if let Some(rest) = name.strip_prefix(NAME_V6) {
-                        (true, rest.to_string())
-                    } else if let Some(rest) = name.strip_prefix(NAME_V4) {
-                        (false, rest.to_string())
-                    } else {
-                        continue;
-                    };
-                    found.push(Existing {
-                        path,
-                        ipv6,
-                        filter_id: (*entry).filterId,
-                    });
-                }
-                wfp::FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut c_void);
-                if returned < 32 {
-                    break;
-                }
+                break;
             }
-
-            wfp::FwpmFilterDestroyEnumHandle0(self.handle, enum_handle);
-            Ok(found)
+            for index in 0..returned as usize {
+                let entry = *entries.add(index);
+                if entry.is_null() {
+                    continue;
+                }
+                let name = read_wide((*entry).displayData.name);
+                let path = if let Some(rest) = name.strip_prefix(NAME_V6) {
+                    rest
+                } else if let Some(rest) = name.strip_prefix(NAME_V4) {
+                    rest
+                } else {
+                    continue;
+                };
+                found.push(Existing {
+                    path: path.to_string(),
+                    ipv6,
+                    filter_id: (*entry).filterId,
+                });
+            }
+            let last_page = returned < ENUM_BATCH;
+            wfp::FwpmFreeMemory0(&mut entries as *mut _ as *mut *mut c_void);
+            if last_page {
+                break;
+            }
+        }
+        wfp::FwpmFilterDestroyEnumHandle0(self.handle, enum_handle);
+        match failure {
+            Some(code) => Err(io::Error::from_raw_os_error(code as i32)),
+            None => Ok(found),
         }
     }
 
-    /// 使实际过滤器集合与期望路径集合一致：补齐缺失、删除多余。
+    /// 使实际过滤器集合与期望路径集合一致：删除多余/重复、补齐缺失。
+    ///
+    /// 去重是必需的：历史版本因枚举模板的 `actionMask` 恒为 0 而始终枚举不到过滤器，
+    /// 每启动一次就再添加一对，真机上已堆积多份同名过滤器。这里对每条路径每一层只保留
+    /// `filter_id` 最小的一条（稳定、可复现），其余全部删除，从而实现自愈。
     pub fn reconcile(&self, wanted: &[String]) -> io::Result<ReconcileReport> {
         self.ensure_provider_sublayer()?;
         let existing = self.existing()?;
-        let mut report = ReconcileReport::default();
+        let mut report = ReconcileReport {
+            observed: existing.len(),
+            ..ReconcileReport::default()
+        };
 
+        // 先把要删的 id 收进 Vec，等枚举缓冲区（`entries`）全部释放后再统一删除：
+        // 在缓冲区仍存活时删除过滤器会让后续读取悬垂内存。
+        let mut stale: Vec<u64> = Vec::new();
+
+        // 1) 同路径同层多于一条时，只留 filter_id 最小的一条。
         for path in wanted {
-            let have: Vec<&Existing> = existing.iter().filter(|item| &item.path == path).collect();
-            let has_v4 = have.iter().any(|item| !item.ipv6);
-            let has_v6 = have.iter().any(|item| item.ipv6);
+            for ipv6 in [false, true] {
+                let mut ids: Vec<u64> = existing
+                    .iter()
+                    .filter(|item| &item.path == path && item.ipv6 == ipv6)
+                    .map(|item| item.filter_id)
+                    .collect();
+                ids.sort_unstable();
+                stale.extend(ids.iter().skip(1).copied());
+            }
+        }
+
+        // 2) 不在期望集合里的路径整组删除（含其重复项）。
+        for item in &existing {
+            if !wanted.iter().any(|path| path == &item.path) {
+                stale.push(item.filter_id);
+            }
+        }
+
+        stale.sort_unstable();
+        stale.dedup();
+        for id in &stale {
+            self.delete_filter(*id)?;
+            report.removed += 1;
+        }
+
+        // 3) 补齐缺失的层。只看去重后存活的项。
+        for path in wanted {
+            let mut has_v4 = false;
+            let mut has_v6 = false;
+            for item in &existing {
+                if &item.path != path || stale.contains(&item.filter_id) {
+                    continue;
+                }
+                if item.ipv6 {
+                    has_v6 = true;
+                } else {
+                    has_v4 = true;
+                }
+            }
             if has_v4 && has_v6 {
                 report.kept += 1;
             } else {
                 self.add_block_layers(path, !has_v4, !has_v6)?;
                 report.added += 1;
-            }
-        }
-
-        for item in &existing {
-            if !wanted.iter().any(|path| path == &item.path) {
-                self.delete_filter(item.filter_id)?;
-                report.removed += 1;
             }
         }
         Ok(report)
@@ -350,8 +446,8 @@ pub fn display_name(path: &str, ipv6: bool) -> String {
 /// 过滤器显示名最大长度，用于日志截断。
 pub fn describe(report: ReconcileReport) -> String {
     format!(
-        "新增 {} 条，删除 {} 条，保持 {} 项",
-        report.added, report.removed, report.kept
+        "原有 {} 条，新增 {} 条，删除 {} 条，保持 {} 项",
+        report.observed, report.added, report.removed, report.kept
     )
 }
 
