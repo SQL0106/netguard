@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  core:
+    name: 核心逻辑（Ubuntu 测试）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 恢复构建缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: core
+          workspaces: ". -> target"
+
+      - name: 代码格式检查
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: 静态检查（Clippy）
+        run: cargo clippy --workspace --all-targets 2>&1 | tee clippy.log
+        shell: bash
+        continue-on-error: true
+
+      - name: 单元测试
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --no-fail-fast 2>&1 | tee test-core.log
+
+      - name: 保存测试与静态检查日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-logs
+          path: |
+            *.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows:
+    name: Windows 构建（release）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 恢复构建缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+          workspaces: ". -> target"
+
+      - name: 构建
+        run: cargo build --workspace --release --verbose 2>&1 | Tee-Object -FilePath build.log
+
+      - name: 保存构建产物与日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            target/release/*.exe
+            target/release/*.pdb
+            build.log
+          if-no-files-found: warn
+          retention-days: 30
+
+  release:
+    name: 发布
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [core, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist --title "$GITHUB_REF_NAME" --generate-notes
