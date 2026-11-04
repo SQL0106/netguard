@@ -155,5 +155,39 @@ sed -n '70,450p' .ci.log | sed 's/^Windows 构建（release）\t构建\t[0-9T:.Z
 该机重启后进入 Fedora（需在 EFI 中调整启动顺序才能回到 Windows），因此 Windows 侧当前没有服务、
 没有数据目录，`C:\ngtest` 下的二进制与预置配置仍在。
 
-**结论**：`v0.1.0` 附带的 `install.ps1` 无法完成安装，必须使用修复后的版本；功能验收（WFP 拦截、
-ETW 守护、热点共存等）尚未开始。
+**结论**：`v0.1.0` 附带的 `install.ps1` 无法完成安装，必须使用修复后的版本。
+
+### 首次运行发现的问题（均已修复，WFP 部分待复验）
+
+安装成功后，服务能启动、能读配置，但拦截完全不生效。逐层排查后发现两个独立缺陷：
+
+| 现象 | 根因 | 修法 | 提交 |
+| --- | --- | --- | --- |
+| `netguard.exe status` 报「配置：不可信（签名不匹配）」，日志「配置文件校验失败：签名不匹配」，名单内程序被全天封锁 | `store::save` 写入 `config.mac` 的内容是 `v1:<64 位十六进制>\n`，`store::load` 却把整行直接交给 `mac::verify_bytes` 比较，长度必然不同 | `mac.rs` 新增 `format_signature` / `parse_signature`，写读两侧共用同一格式；新增两个单测覆盖缺前缀、错前缀、长度不符、非十六进制 | `f46fe8c` |
+| 日志「同步过滤器失败：枚举模板或订阅将不匹配任何对象」，一条过滤器都建不起来 | `FWP_E_FILTER_NOT_FOUND` 被写成 `0x80320013`（那其实是 `FWP_E_NET_EVENTS_DISABLED`），真正要宽容的 `FWP_E_NEVER_MATCH = 0x80320033` 没有处理，`check()` 直接把「还没有过滤器」当失败 | 常量改为 `0x80320003`，新增 `FWP_E_NEVER_MATCH` 并在枚举入口按空集合处理 | `c557d9f` |
+| 修完上一条后，日志「同步过滤器失败：该调用尝试将两个生存时间不兼容的对象相互关联」（`FWP_E_LIFETIME_MISMATCH = 0x80320016`） | 过滤器是持久化的，但它引用的 Provider 与子层是按会话创建的，生命周期不一致 | `provider.flags = FWPM_PROVIDER_FLAG_PERSISTENT`、`sublayer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT` | 本次提交 |
+| 只缺 IPv6 层时会重新添加双栈，产生重复的 IPv4 过滤器且永不清理 | `reconcile` 只判断「两层是否都在」，添加时却总是加两层 | `add_block` 改为 `add_block_layers(path, want_v4, want_v6)`，只补缺失层 | `c557d9f` |
+
+WFP 错误码对照（`windows-sys` 0.59 的 `Win32::Foundation`，勿凭记忆手抄）：
+
+```
+FWP_E_FILTER_NOT_FOUND     0x80320003
+FWP_E_NOT_FOUND            0x80320008
+FWP_E_ALREADY_EXISTS       0x80320009
+FWP_E_NET_EVENTS_DISABLED  0x80320013   ← 曾被误当成 FILTER_NOT_FOUND
+FWP_E_LIFETIME_MISMATCH    0x80320016
+FWP_E_NEVER_MATCH          0x80320033
+```
+
+### 代码审查中另外发现的问题
+
+| 位置 | 问题 | 处理 |
+| --- | --- | --- |
+| `http.rs` `factor_from_name` | 无法识别的认证方式被静默降级为 `Factors::None`，一次拼写错误就能装出「无需认证」的服务 | 改为返回 `Option`，未知值直接 400 |
+| `http.rs` `handle_override` | `minutes = 0`（取消放行）时既不校验会话是否存在，也不校验 Cookie 真伪 | 先 `sessions.touch` 校验会话，再判断提升验证 |
+| `http.rs` `Api::new` | 初始化窗口从服务启动计时，重启服务即可重新获得 10 分钟窗口 | 未改，属文档口径问题，验收时按「未初始化且服务刚启动」理解 |
+| `store.rs` `load_state` | `state.json` 解析失败会静默清空水位线与失败计数 | 目录仅 SYSTEM 可写，风险可接受，暂不处理 |
+| `install.ps1 -Uninstall` | 卸载不会删除持久化过滤器，重装前它们仍然生效 | 待办：增加清理入口（见下） |
+
+**当前状态**：签名问题已在真机确认修复（`status` 显示「配置：有效」）；WFP 拦截尚待用带持久化标志
+的构建复验。

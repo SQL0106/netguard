@@ -120,6 +120,9 @@ impl Engine {
             let mut provider_name = wide("NetGuard");
             let mut provider_desc = wide("NetGuard 应用级网络访问控制");
             let mut provider: wfp::FWPM_PROVIDER0 = std::mem::zeroed();
+            // 持久化过滤器只能引用同样持久化的 Provider 与子层，
+            // 否则 FwpmFilterAdd0 返回 FWP_E_LIFETIME_MISMATCH (0x80320016)。
+            provider.flags = wfp::FWPM_PROVIDER_FLAG_PERSISTENT;
             provider.providerKey = PROVIDER_KEY;
             provider.displayData.name = provider_name.as_mut_ptr();
             provider.displayData.description = provider_desc.as_mut_ptr();
@@ -132,6 +135,7 @@ impl Engine {
             let mut sub_desc = wide("NetGuard 持久化过滤器集合");
             let mut provider_key = PROVIDER_KEY;
             let mut sublayer: wfp::FWPM_SUBLAYER0 = std::mem::zeroed();
+            sublayer.flags = wfp::FWPM_SUBLAYER_FLAG_PERSISTENT;
             sublayer.subLayerKey = SUBLAYER_KEY;
             sublayer.displayData.name = sub_name.as_mut_ptr();
             sublayer.displayData.description = sub_desc.as_mut_ptr();

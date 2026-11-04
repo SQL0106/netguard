@@ -177,12 +177,17 @@ struct SetupBody {
     totp_secret: Option<String>,
 }
 
-fn factor_from_name(name: &str) -> Factors {
+/// 解析认证方式名称。
+///
+/// 无法识别的名称必须当作错误，不能默认为“无需认证”：初始化接口若把拼错的
+/// 因子名静默降级，会装出一个完全不需要凭据的服务。
+fn factor_from_name(name: &str) -> Option<Factors> {
     match name {
-        "pw" | "password" => Factors::Password,
-        "totp" => Factors::Totp,
-        "both" => Factors::Both,
-        _ => Factors::None,
+        "none" => Some(Factors::None),
+        "pw" | "password" => Some(Factors::Password),
+        "totp" => Some(Factors::Totp),
+        "both" => Some(Factors::Both),
+        _ => None,
     }
 }
 
@@ -264,7 +269,10 @@ fn handle_setup(api: &Api, request: &mut Request) -> Response<std::io::Cursor<Ve
         Ok(value) => value,
         Err(err) => return fail(400, &err),
     };
-    let factors = factor_from_name(body.factors.as_deref().unwrap_or("both"));
+    let factors = match factor_from_name(body.factors.as_deref().unwrap_or("both")) {
+        Some(value) => value,
+        None => return fail(400, "无法识别的认证方式"),
+    };
     let seed = PreSeed {
         version: 0,
         enabled: true,
@@ -495,7 +503,12 @@ fn handle_override(api: &Api, request: &mut Request) -> Response<std::io::Cursor
         Some(value) => value,
         None => return fail(401, "需要登录"),
     };
-    if body.minutes > 0 && !step_up_ok(api, Some(&id)) {
+    // 先确认会话本身有效：取消放行也要校验，避免任何人拿一个过期 Cookie 就能改动状态。
+    let session = match api.sessions.touch(&id) {
+        Some(value) => value,
+        None => return fail(401, "会话已失效"),
+    };
+    if body.minutes > 0 && !session.fresh() {
         let supplied = body.pw.as_deref();
         let code = body.totp.as_deref();
         if supplied.is_none() && code.is_none() {
