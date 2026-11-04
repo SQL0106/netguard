@@ -14,7 +14,8 @@ use std::ffi::c_void;
 use std::io;
 use std::ptr;
 
-use windows_sys::Win32::Foundation::{GUID, HANDLE};
+use windows_sys::core::GUID;
+use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform as wfp;
 
 /// `RPC_C_AUTHN_WINNT`。常量位于 `Win32::System::Rpc`，此处直接取数值以避免额外特性。
@@ -125,7 +126,7 @@ impl Engine {
             sublayer.subLayerKey = SUBLAYER_KEY;
             sublayer.displayData.name = sub_name.as_mut_ptr();
             sublayer.displayData.description = sub_desc.as_mut_ptr();
-            sublayer.providerKey = &mut provider_key;
+            sublayer.providerKey = &mut provider_key as *mut GUID;
             sublayer.weight = u16::MAX;
             let code = wfp::FwpmSubLayerAdd0(self.handle, &sublayer, ptr::null());
             if code != ERROR_SUCCESS && code as i32 != ERROR_ALREADY_EXISTS {
@@ -151,8 +152,8 @@ impl Engine {
             let mut condition: wfp::FWPM_FILTER_CONDITION0 = std::mem::zeroed();
             condition.fieldKey = wfp::FWPM_CONDITION_ALE_APP_ID;
             condition.matchType = wfp::FWP_MATCH_EQUAL;
-            condition.conditionValue.type_ = wfp::FWP_BYTE_BLOB_TYPE;
-            condition.conditionValue.anonymous.byteBlob = blob;
+            condition.conditionValue.r#type = wfp::FWP_BYTE_BLOB_TYPE;
+            condition.conditionValue.Anonymous.byteBlob = blob;
 
             let mut ids = Vec::with_capacity(2);
             let mut first_err = None;
@@ -184,12 +185,12 @@ impl Engine {
         let mut provider_key = PROVIDER_KEY;
         let mut filter: wfp::FWPM_FILTER0 = std::mem::zeroed();
         filter.displayData.name = display.as_mut_ptr();
-        filter.providerKey = &mut provider_key;
+        filter.providerKey = &mut provider_key as *mut GUID;
         filter.layerKey = layer;
         filter.subLayerKey = SUBLAYER_KEY;
         filter.numFilterConditions = 1;
         filter.filterCondition = condition;
-        filter.action.type_ = wfp::FWP_ACTION_BLOCK;
+        filter.action.r#type = wfp::FWP_ACTION_BLOCK;
         filter.flags = wfp::FWPM_FILTER_FLAG_PERSISTENT;
 
         let mut id: u64 = 0;
@@ -217,7 +218,7 @@ impl Engine {
     pub fn existing(&self) -> io::Result<Vec<Existing>> {
         let mut template: wfp::FWPM_FILTER_ENUM_TEMPLATE0 = unsafe { std::mem::zeroed() };
         let mut provider_key = PROVIDER_KEY;
-        template.providerKey = &mut provider_key;
+        template.providerKey = &mut provider_key as *mut GUID;
 
         unsafe {
             let mut enum_handle: HANDLE = std::mem::zeroed();
