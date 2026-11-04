@@ -21,7 +21,8 @@ use windows_sys::Win32::Foundation::NO_ERROR;
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SetServiceStatus, StartServiceCtrlDispatcherW, SERVICE_ACCEPT_NETBINDCHANGE,
     SERVICE_ACCEPT_PARAMCHANGE, SERVICE_ACCEPT_POWEREVENT, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
-    SERVICE_ACCEPT_TIMECHANGE, SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_NETBINDCHANGE, SERVICE_CONTROL_PARAMCHANGE,
+    SERVICE_ACCEPT_TIMECHANGE, SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_NETBINDENABLE, SERVICE_CONTROL_NETBINDDISABLE,
+    SERVICE_CONTROL_PARAMCHANGE,
     SERVICE_CONTROL_POWEREVENT, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_CONTROL_TIMECHANGE,
     SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOPPED, SERVICE_STOP_PENDING,
     SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
@@ -110,11 +111,14 @@ unsafe extern "system" fn handler(control: u32, event_type: u32, event_data: *mu
                 ticker.notify();
             }
         }
-        SERVICE_CONTROL_TIMECHANGE | SERVICE_CONTROL_NETBINDCHANGE | SERVICE_CONTROL_PARAMCHANGE => {
+        SERVICE_CONTROL_TIMECHANGE
+        | SERVICE_CONTROL_NETBINDENABLE
+        | SERVICE_CONTROL_NETBINDDISABLE
+        | SERVICE_CONTROL_PARAMCHANGE => {
             if let Some(logger) = LOGGER.get() {
                 let reason = match control {
                     SERVICE_CONTROL_TIMECHANGE => "系统时间已变更",
-                    SERVICE_CONTROL_NETBINDCHANGE => "网络绑定已变更",
+                    SERVICE_CONTROL_NETBINDENABLE | SERVICE_CONTROL_NETBINDDISABLE => "网络绑定已变更",
                     _ => "服务参数已变更",
                 };
                 logger.info(reason);
@@ -235,9 +239,4 @@ pub fn run_console() -> io::Result<()> {
             logger.warn("配置完整性异常，处于封锁状态");
         }
     }
-}
-
-#[allow(dead_code)]
-fn _unused_marker() {
-    let _ = SERVICE_STOPPED;
 }
