@@ -1,85 +1,102 @@
 # 进度记录
 
-本文件由开发过程维护，用于在上下文受限时恢复工作状态。设计细节见 [DESIGN.md](DESIGN.md)。
+本文件用于在上下文受限或会话中断时恢复工作状态。设计细节见 [DESIGN.md](DESIGN.md)，
+面向使用者的说明见 [README.md](../README.md)。
 
-## 当前状态（2026-11-04）
+## 一、当前状态（2026-11-04）
 
-仓库已公开：`https://github.com/SQL0106/netguard`。所有编译与测试只在 GitHub Actions 执行，
-本机不进行任何 `cargo` 构建。
+仓库地址：`https://github.com/SQL0106/netguard`（公开）。
+
+**硬约束：本机不做任何编译。** 全部构建、检查与测试只在 GitHub Actions 执行
+（`ubuntu-latest` 跑 core 单元测试，`windows-latest` 产出可执行文件）。本机仅编辑源码与文档。
+
+## 二、模块清单
 
 | 模块 | 文件 | 状态 |
 | --- | --- | --- |
-| 纯逻辑：配置、排程、TOTP、口令、签名、哈希 | `crates/core/src/*.rs` | 完成，单元测试通过 |
-| 无人值守初始化 | `crates/core/src/bootstrap.rs` | 完成，单元测试通过 |
-| 路径与 ACL | `crates/win/src/paths.rs` | 完成 |
-| DPAPI | `crates/win/src/dpapi.rs` | 完成 |
-| 日志 | `crates/win/src/log.rs` | 完成 |
-| 配置存储与签名校验 | `crates/win/src/store.rs` | 完成 |
-| 等待器（边界唤醒，非轮询） | `crates/win/src/ticker.rs` | 完成 |
-| WFP 过滤器封装与增量协调 | `crates/win/src/wfp.rs` | 已写，等待 CI 验证 |
-| 运行时工作线程与排程调度 | `crates/win/src/engine.rs` | 已写，等待 CI 验证 |
-| 会话与提升验证 | `crates/win/src/session.rs` | 完成 |
-| 随机数工具 | `crates/win/src/random.rs` | 完成 |
-| HTTP 接口 | `crates/win/src/http.rs` | 完成，等待 CI 验证 |
-| WebUI 静态资源 | `web/index.html`、`web/app.js`、`web/style.css` | 完成 |
-| 服务宿主 | `crates/win/src/svc.rs` | 未开始 |
-| ETW 进程哈希守护 | `crates/win/src/etw.rs` | 未开始 |
-| 安装脚本 | `install.ps1` | 未开始 |
+| 配置模型与校验 | `crates/core/src/config.rs` | 完成，单测通过 |
+| 时间窗与生效判定 | `crates/core/src/schedule.rs` | 完成，单测通过 |
+| TOTP（RFC 6238） | `crates/core/src/totp.rs` | 完成，官方向量通过 |
+| 口令与恢复码 | `crates/core/src/auth.rs` | 完成，单测通过 |
+| HMAC 签名与恒定时间比较 | `crates/core/src/mac.rs` | 完成，单测通过 |
+| 哈希判断与受保护进程 | `crates/core/src/guard.rs` | 完成，单测通过 |
+| 无人值守初始化 | `crates/core/src/bootstrap.rs` | 完成，单测通过 |
+| 路径与目录 ACL | `crates/win/src/paths.rs` | 完成 |
+| DPAPI 保护 | `crates/win/src/dpapi.rs` | 完成 |
+| 日志轮转 | `crates/win/src/log.rs` | 完成 |
+| 配置存储与签名校验、fail-closed | `crates/win/src/store.rs` | 完成 |
+| 边界唤醒等待器（非轮询） | `crates/win/src/ticker.rs` | 完成 |
+| WFP 过滤器与增量协调 | `crates/win/src/wfp.rs` | 已写，待 CI 通过 |
+| 运行时引擎与工作线程 | `crates/win/src/engine.rs` | 已写，待 CI 通过 |
+| 会话与提升验证 | `crates/win/src/session.rs` | 已写，待 CI 通过 |
+| 本地控制台（HTTP API + 静态页面） | `crates/win/src/http.rs`、`web/` | 已写，待 CI 通过 |
+| 服务宿主 | `crates/win/src/svc.rs` | 已写，待 CI 通过 |
+| ETW 哈希守护 | `crates/win/src/etw.rs` | 已写，待 CI 通过 |
+| 命令行 | `crates/win/src/cli.rs`、`crates/win/src/cli_client.rs` | 完成 |
+| 安装脚本 | `install.ps1` | 完成 |
 
-## 控制台接口一览
+## 三、控制台接口
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/`、`/app.js`、`/style.css` | 静态页面（编译期内嵌） |
-| POST | `/api/setup` | 首次初始化，仅在未初始化且安装后十分钟内开放，返回 otpauth 链接与恢复码 |
-| POST | `/api/login` | 按已启用因子登录，口令、TOTP、恢复码三者择一（恢复码仅在有启用认证时有效） |
-| POST | `/api/logout` | 清除会话 |
-| GET | `/api/state` | 当前状态、拦截清单、下一边界 |
-| GET | `/api/config` | 读取配置 |
-| PUT | `/api/config` | 保存配置（需提升验证） |
-| POST | `/api/totp` | 重新生成 TOTP 密钥与恢复码（需提升验证） |
-| POST | `/api/override` | 临时放行指定分钟数，0 表示取消 |
-| GET | `/api/log` | 读取日志尾部若干行 |
+监听 `127.0.0.1:47811`，仅回环。会话 Cookie 名 `ng_session`，HttpOnly、SameSite=Strict，
+空闲 15 分钟过期；改配置、临时放行、卸载等敏感操作需在 5 分钟内重新验证。
 
-会话 Cookie 为 `ng_session`，15 分钟空闲过期；敏感操作要求 5 分钟内的提升验证。
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /` `/app.js` `/style.css` | 静态页面 |
+| `POST /api/setup` | 首次初始化，仅未初始化且安装后 10 分钟窗口内可用 |
+| `POST /api/login` | 按已启用因子登录，返回会话 Cookie |
+| `POST /api/logout` | 注销 |
+| `GET /api/state` | 运行状态、生效名单、下一变更时刻 |
+| `GET /api/config` | 读取配置（不含凭据明文） |
+| `PUT /api/config` | 保存配置，需提升验证 |
+| `POST /api/override` | 临时放行，`minutes` 为 0 表示取消 |
+| `POST /api/totp` | 重新生成 TOTP 密钥或恢复码 |
+| `GET /api/log` | 读取日志尾部若干行 |
 
-## 已修正的历史缺陷（`crates/win/src/http.rs`）
+`ngcli` 为同一接口的命令行客户端，会话信息保存于数据目录。
 
-1. `verify()` 中口令取值一行被工具链的凭据脱敏改写，磁盘内容不正确，需要重写该行；
-   同时 `check_login` 要求 `&mut self`，当前对不可变配置调用，需要先克隆为可变副本。
-2. `AppRule`/`Config` 在 `handle_config_put` 中的认证字段合并逻辑引用了不存在的变量，需要按
-   「未提供则沿用旧值」重写。
-3. `handle_setup` 同时调用了 `store().save()` 与 `replace_config()`，重复写盘，只保留后者。
-4. `SetupBody` 使用 `#[serde(flatten)]` 与 `deny_unknown_fields` 冲突，应直接解析 `PreSeed`。
-5. `record_failure`/`clear_failures` 使用 `RuntimeState`，而口令失败计数位于
-   `AuthConfig`，须改为通过 `AuthConfig::register_failure` 后随配置保存。
-6. 文件末尾的 `_unused`、`write_all`、`wait_forever` 属于占位代码，应删除。
-7. 以上七项均已在重写时修正：认证改动经 `replace_config` 落盘、配置合并按「未提供则沿用旧值」处理、初始化只写一次、请求体直接解析结构化字段、模块已登记。
+## 四、安全要点（与 DESIGN §6 一致）
 
-## 凭据脱敏工具的影响
+- 配置写入 `C:\ProgramData\NetGuard\config.json`，签名保存在 `config.mac`，
+  签名对象是解析后按结构体声明顺序重新序列化的规范字节串，因此缩进与键序不影响校验。
+- 签名不匹配或配置缺失一律 fail-closed：沿用内存中最后一次有效配置，若内存中无有效配置，
+  则名单内程序按全天封锁处理，并写入日志、在页面顶部显示告警。
+- 目录 ACL 为 SYSTEM 完全控制、Administrators 只读，普通用户无权写入。
+- 过滤器为持久化对象，服务停止后拦截依然生效；服务启动时按 Provider 键枚举并与配置求差集。
+- 服务控制权限经 `sc sdset` 收紧，Administrators 无法 `sc stop` 或 `sc delete`。
 
-`@kkchengg/opencode-redact` 会把形如 `password: 值`、`password = 值` 的片段在工具输出中替换为
-`[REDACTED:credential:…]`。已确认：**磁盘内容本身也可能被改写**（写入前钩子会处理待写入文本）。
-因此源码中不要出现「`password` 紧跟 `=` 或 `:` 再跟值」的写法，改用中间变量，例如：
+## 五、CI 约定
 
-```rust
-let supplied = body.password.as_deref();
+- 缓存：`Swatinem/rust-cache@v2`，core 与 windows 各自独立键。
+- 产物：两个 job 的上传步骤均为 `if: always()`，即使编译或测试失败也保留日志与可执行文件。
+- 发布：推送 `v*` 标签时聚合产物并创建 Release。
+- 查看失败原因：
+
+```bash
+gh run view <id> --log-failed | sed 's/\x1b\[[0-9;]*m//g' > .ci.log
+sed -n '70,450p' .ci.log | sed 's/^Windows 构建（release）\t构建\t[0-9T:.Z-]* //' | head -150
 ```
 
-字段声明 `password: Option<String>` 在磁盘上会被截短为 `password: [REDACTED…],`，需用
-`awk 'NR==n{print length($0)}'` 核对行长度，不要依赖视觉核对。
+## 六、待办
 
-## 环境限制
+1. 等待当前 CI 运行通过；若仍有编译错误，按上节方法读取日志并修复。
+2. 数据目录变更监听（`ReadDirectoryChangesW`），使外部改动配置后无需等待人工操作即可重算。
+3. 在 `win`（192.168.1.199）上做验收：拦截生效、热点共存、边界翻转、睡眠唤醒、时钟回拨、
+   服务无法停止、连续登录失败锁定、TOTP 同码重放拒绝、配置篡改 fail-closed。
+4. 校对 README 与 DESIGN 的措辞，使其与实现完全一致。
+5. 打 `v0.1.0` 标签触发首次 Release。
 
-- 本机 `/home` 剩余空间约 2.4 GB，根分区剩余约 66 GB。
-- 禁止在妹妹的 Windows（`sister`，192.168.1.130）上安装或测试；验证目标仅限 `win`
-  （192.168.1.199，同一台双系统机的 Windows 侧）。
-- 推送须带 `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o IdentityAgent=/home/SQL916/.ssh/agent.sock"`。
+## 七、实现中的取舍
 
-## 里程碑
+- 排程唤醒使用条件变量单次等待（`ticker.rs`），不使用高频轮询，也不依赖内核定时器对象；
+  任一时刻只有一个截止时刻，到点重算。
+- `wfp.rs` 的结构体字段按 windows-sys 0.59 的实际定义书写（`r#type`、`Anonymous`、
+  `windows_sys::core::GUID`），常量 `AUTHN_WINNT` 直接取数值 10 以避免启用额外特性。
+- ETW 订阅只读取事件头中的进程标识，不解析负载；仅当进程基名命中名单时才读取映像并计算哈希。
+- 源码中不出现「口令字段名紧跟等号或冒号再加字面值」的写法，避免编辑器插件改写磁盘内容；
+  统一使用 `pw` 作为请求字段名。
 
-- M0 核心逻辑与单元测试：已完成。
-- M1 WFP 协调与服务安装：进行中（`wfp.rs`、`engine.rs` 待 CI 验证）。
-- M2 WebUI 与命令行：进行中（控制台与静态页面已完成，待 CI 验证）。
-- M3 哈希守护与看门狗：未开始。
-- M4 端到端验收：未开始。
+## 八、环境备忘
+
+- 开发机 `/home` 空间紧张，`/` 尚有余量；因此任何构建产物都不落在本机。
+- 不在此开发机上运行本程序；Windows 侧测试只在 `win`（192.168.1.199）进行。
