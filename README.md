@@ -71,6 +71,55 @@ Windows 应用级网络访问控制程序。用于在指定时间段内禁止指
 
 卸载：`install.ps1 -Uninstall`，或在 WebUI 中执行卸载操作（需重新认证）。
 
+### 无人值守安装
+
+适用于批量部署或系统镜像制作。安装脚本支持命令行参数与预置配置文件，全程无需人工确认：
+
+```powershell
+.\install.ps1 -Silent `
+              -Config .\preseed.json `
+              -PasswordFile .\pw.txt `
+              -RecoveryOut .\recovery-codes.txt
+```
+
+参数说明：
+
+| 参数 | 说明 |
+| --- | --- |
+| `-Silent` | 不产生任何交互提示，日志写入 `C:\ProgramData\NetGuard\install.log` |
+| `-InstallDir` | 安装目录，默认 `C:\Program Files\NetGuard` |
+| `-Config` | 预置配置文件，格式见下文 |
+| `-Factors` | 认证因子组合：`none`、`password`、`totp`、`both`，覆盖配置文件中的取值 |
+| `-Password` | 初始密码；不建议使用，因其会出现在命令历史与进程列表中 |
+| `-PasswordFile` | 从文件首行读取初始密码，文件仅需安装账户可读 |
+| `-PasswordStdin` | 从标准输入读取初始密码，适合由其他程序调用 |
+| `-TotpSecret` | 预先指定的 Base32 动态口令密钥；省略时由程序生成 |
+| `-RecoveryOut` | 将生成的恢复码以明文写入该文件，安装完成后应妥善保管并删除 |
+| `-NoStart` | 完成注册但不启动服务 |
+| `-Force` | 已有配置时覆盖，需同时提供凭据 |
+
+退出码：`0` 成功，`2` 参数错误，`3` 配置校验失败，`4` 服务启动失败，`5` 权限不足。
+
+预置配置文件与运行时配置结构一致，另可包含明文 `factors`、`password`、`totp_secret` 与 `recovery_code_count` 四个字段。安装时密码与恢复码会被散列化，明文不落盘，预置文件本身不被修改：
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "apps": [
+    { "name": "示例程序", "path": "C:\\Program Files\\Example\\example.exe",
+      "schedule": { "windows": [ { "days": 127, "start": 0, "end": 1440 } ] } }
+  ],
+  "hashes": [],
+  "factors": "both",
+  "password": "安装时被散列，之后不再以明文形式存在",
+  "totp_secret": "",
+  "recovery_code_count": 10
+}
+```
+
+该流程等价于在 WebUI 中人工完成：选择因子、设置密码、生成动态口令密钥、导出恢复码。
+
 ## 六、配置
 
 配置位于 `C:\ProgramData\NetGuard\config.json`，完整性签名位于 `config.mac`。
