@@ -97,10 +97,32 @@ jobs:
       - name: 下载构建产物
         uses: actions/download-artifact@v4
         with:
+          name: windows-release
           path: dist
-          merge-multiple: true
+
+      - name: 整理发布附件
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f dist/build.log dist/*.pdb
+          cp install.ps1 dist/
+          cp README.md dist/
+          cp docs/DESIGN.md dist/
+          ls -l dist
 
       - name: 创建 Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" dist --title "$GITHUB_REF_NAME" --generate-notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=()
+          for f in dist/*.exe dist/install.ps1 dist/README.md; do
+            [ -f "$f" ] && assets+=("$f")
+          done
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "没有可发布的文件" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --title "$GITHUB_REF_NAME" --generate-notes
