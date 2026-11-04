@@ -46,6 +46,16 @@ impl Api {
         }
     }
 
+    /// 是否已经初始化过。
+    ///
+    /// 主配置或配置备份**任一**存在即算初始化过：备份存在意味着这台机器确实跑过一次
+    /// 成功保存，不能因为 `config.json` 被删就当它是新机器（否则初始化窗口会重开，
+    /// 前端也会隐藏登录表单，把唯一的恢复路径挡掉）。
+    fn initialized(&self) -> bool {
+        let store = self.engine.store();
+        store.is_initialized() || store.has_backup()
+    }
+
     /// 初始化窗口是否开放。
     ///
     /// 只对「真正首次安装」开放：主配置不存在**且**没有任何配置备份。
@@ -53,7 +63,7 @@ impl Api {
     /// 把认证方式改成「无需认证」并把名单清空 —— 那会把 fail-closed 直接抵消掉。
     /// 需要重置时走安装脚本（`install.ps1 -Force` 的 CLI 初始化），不经过这条 HTTP 路径。
     fn setup_open(&self) -> bool {
-        if self.engine.store().is_initialized() || self.engine.store().has_backup() {
+        if self.initialized() {
             return false;
         }
         let until = *self.setup_until.lock().unwrap();
@@ -246,7 +256,7 @@ fn state_payload(api: &Api, authenticated: bool) -> Value {
         .collect();
 
     json!({
-        "initialized": api.engine.store().is_initialized(),
+        "initialized": api.initialized(),
         "enabled": snapshot.config.enabled,
         "factors": factors.as_str(),
         "needs_password": factors.needs_password(),

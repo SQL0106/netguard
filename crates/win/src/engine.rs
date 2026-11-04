@@ -217,7 +217,7 @@ impl Engine {
     ///
     /// 供数据目录监视器使用：外部（例如安装脚本或其他管理工具）替换配置后立即生效。
     /// 校验失败时按失效即封锁处理：主配置不可信则改用上次已知良好的备份（见
-    /// [`load_effective`]），两者都不可信时保留快照中的旧配置与名单用于显示。
+    /// `load_effective`），两者都不可信时保留快照中的旧配置与名单用于显示。
     pub fn reload_from_disk(&self) -> Reload {
         match load_effective(&self.store) {
             Effective::Trusted(config) => {
