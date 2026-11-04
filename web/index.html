@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NetGuard 控制台</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>NetGuard 控制台</h1>
+      <div class="meta mono" id="clock">—</div>
+    </header>
+
+    <main>
+      <div class="banner hidden" id="banner"></div>
+
+      <section id="setup" class="hidden">
+        <h2>首次初始化<span class="hint">仅在尚未初始化且处于安装窗口内可用</span></h2>
+        <p class="muted">
+          初始化将写入认证凭据与应用名单。若选择 TOTP 或双因子，将在完成后显示二维码链接与恢复码，
+          请立即妥善保存，界面关闭后不再显示。
+        </p>
+        <div class="row">
+          <div>
+            <label for="setup-factor">认证方式</label>
+            <select id="setup-factor">
+              <option value="none">无需认证（不推荐）</option>
+              <option value="pw">单因子：口令</option>
+              <option value="totp">单因子：TOTP</option>
+              <option value="both" selected>双因子：口令 + TOTP</option>
+            </select>
+          </div>
+          <div>
+            <label for="setup-pw">口令</label>
+            <input type="text" id="setup-pw" autocomplete="new-password" />
+          </div>
+          <div>
+            <label for="setup-totp">TOTP 密钥（留空则自动生成）</label>
+            <input type="text" id="setup-totp" class="mono" placeholder="Base32" />
+          </div>
+          <div style="flex: 0 0 auto">
+            <button id="setup-submit">初始化</button>
+          </div>
+        </div>
+        <div id="setup-result" class="hidden">
+          <p class="muted">请将下列信息录入认证器或抄录保存：</p>
+          <p class="mono" id="setup-uri"></p>
+          <div class="codes" id="setup-codes"></div>
+          <p class="muted">恢复码仅可使用一次；重新生成会使旧码失效。</p>
+        </div>
+      </section>
+
+      <section id="login" class="hidden">
+        <h2>登录</h2>
+        <div class="row">
+          <div>
+            <label for="login-pw">口令</label>
+            <input type="text" id="login-pw" autocomplete="current-password" />
+          </div>
+          <div>
+            <label for="login-totp">TOTP 验证码</label>
+            <input type="text" id="login-totp" class="mono" inputmode="numeric" maxlength="6" />
+          </div>
+          <div>
+            <label for="login-recovery">恢复码（可选）</label>
+            <input type="text" id="login-recovery" class="mono" placeholder="XXXXX-XXXXX" />
+          </div>
+          <div style="flex: 0 0 auto">
+            <button id="login-submit">登录</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="status">
+        <h2>运行状态</h2>
+        <div class="grid">
+          <div class="stat">
+            <div class="label">总开关</div>
+            <div class="value" id="st-enabled">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">当前状态</div>
+            <div class="value" id="st-phase">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">下次切换</div>
+            <div class="value" id="st-next">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">配置完整性</div>
+            <div class="value" id="st-integrity">—</div>
+          </div>
+        </div>
+        <table style="margin-top: 14px">
+          <thead>
+            <tr>
+              <th>应用</th>
+              <th>路径</th>
+              <th>当前</th>
+              <th>时段</th>
+            </tr>
+          </thead>
+          <tbody id="apps-body"></tbody>
+        </table>
+      </section>
+
+      <section id="apps">
+        <h2>应用名单与时段<span class="hint">修改后需保存并重新认证</span></h2>
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 18%">名称</th>
+              <th style="width: 32%">可执行文件路径</th>
+              <th style="width: 34%">星期与时间窗</th>
+              <th style="width: 16%">操作</th>
+            </tr>
+          </thead>
+          <tbody id="edit-body"></tbody>
+        </table>
+        <div class="row" style="margin-top: 12px">
+          <div style="flex: 0 0 auto">
+            <button class="ghost" id="add-app">新增应用</button>
+          </div>
+          <div style="flex: 0 0 auto">
+            <button class="ghost" id="add-window">新增时间窗</button>
+          </div>
+        </div>
+        <p class="muted">
+          时间窗为半开区间 [开始, 结束)；结束早于开始时视为跨午夜。某应用若没有任何时间窗，
+          表示该应用全天受管。星期位掩码：周一为最低位。
+        </p>
+        <div class="row">
+          <div>
+            <label for="auth-pw">当前口令（用于本次保存）</label>
+            <input type="text" id="auth-pw" autocomplete="current-password" />
+          </div>
+          <div>
+            <label for="auth-totp">当前 TOTP</label>
+            <input type="text" id="auth-totp" class="mono" maxlength="6" />
+          </div>
+          <div style="flex: 0 0 auto">
+            <button id="save-config">保存配置</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="security">
+        <h2>认证与临时放行</h2>
+        <div class="row">
+          <div>
+            <label for="ov-minutes">临时放行分钟数</label>
+            <input type="number" id="ov-minutes" min="0" max="1440" value="15" />
+          </div>
+          <div style="flex: 0 0 auto">
+            <button id="override-apply">应用</button>
+          </div>
+          <div style="flex: 0 0 auto">
+            <button class="ghost" id="override-cancel">取消放行</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 14px">
+          <div>
+            <label for="totp-pw">当前口令（重新生成 TOTP 时校验）</label>
+            <input type="text" id="totp-pw" autocomplete="current-password" />
+          </div>
+          <div style="flex: 0 0 auto">
+            <button class="ghost" id="regen-totp">重新生成 TOTP 密钥</button>
+          </div>
+          <div style="flex: 0 0 auto">
+            <button class="ghost" id="regen-recovery">重新生成恢复码</button>
+          </div>
+        </div>
+        <div id="secret-box" class="hidden">
+          <p class="mono" id="secret-uri" style="word-break: break-all"></p>
+          <div class="codes" id="secret-codes"></div>
+        </div>
+        <div class="row" style="margin-top: 14px">
+          <div style="flex: 0 0 auto">
+            <button class="ghost" id="logout">退出登录</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="logs">
+        <h2>事件日志</h2>
+        <div class="row" style="margin-bottom: 10px">
+          <div>
+            <label for="log-lines">行数</label>
+            <input type="number" id="log-lines" min="10" max="500" value="120" />
+          </div>
+          <div style="flex: 0 0 auto">
+            <button class="ghost" id="log-refresh">刷新</button>
+          </div>
+        </div>
+        <pre class="log" id="log-body">—</pre>
+      </section>
+    </main>
+
+    <dialog id="confirm">
+      <h3 id="confirm-title">需要重新验证</h3>
+      <p class="muted" id="confirm-note">该操作需要重新验证身份。</p>
+      <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px">
+        <div>
+          <label for="confirm-pw">口令</label>
+          <input type="text" id="confirm-pw" autocomplete="current-password" />
+        </div>
+        <div>
+          <label for="confirm-totp">TOTP</label>
+          <input type="text" id="confirm-totp" class="mono" maxlength="6" />
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px">
+        <button class="ghost" id="confirm-cancel">取消</button>
+        <button id="confirm-ok">确认</button>
+      </div>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -16,11 +16,17 @@ pub mod dpapi;
 #[cfg(windows)]
 pub mod endpoint;
 #[cfg(windows)]
+pub mod http;
+#[cfg(windows)]
 pub mod engine;
 #[cfg(windows)]
 pub mod log;
 #[cfg(windows)]
 pub mod paths;
+#[cfg(windows)]
+pub mod random;
+#[cfg(windows)]
+pub mod session;
 #[cfg(windows)]
 pub mod store;
 #[cfg(windows)]
