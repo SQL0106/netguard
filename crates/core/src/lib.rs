@@ -10,12 +10,15 @@
 //! - [`auth`]     口令与恢复码（Argon2id）、失败计数与锁定
 //! - [`mac`]      配置完整性签名（HMAC-SHA256）
 //! - [`guard`]    哈希守护用的辅助函数（SHA-256 流式、系统进程保护名单）
+//! - [`bootstrap`] 无人值守初始化（预置配置 → 正式配置）
 
 pub mod auth;
+pub mod bootstrap;
 pub mod config;
 pub mod guard;
 pub mod mac;
 pub mod schedule;
 pub mod totp;
 
+pub use bootstrap::{Bootstrap, BootstrapError, PreSeed};
 pub use config::{AppRule, AuthConfig, Config, Factors, Schedule, TimeWindow};
