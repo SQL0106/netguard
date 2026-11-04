@@ -27,8 +27,11 @@ const ERROR_NOT_FOUND: i32 = 1168;
 /// 注意它**不是** Win32 的 `ERROR_ALREADY_EXISTS`（183），
 /// 用后者比较会把「已存在」误判成真错误。
 const FWP_E_ALREADY_EXISTS: u32 = 0x8032_0009;
-/// `FWP_E_FILTER_NOT_FOUND`：枚举模板匹配不到任何对象，应视为空集合。
-const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0013;
+/// `FWP_E_FILTER_NOT_FOUND`：过滤器不存在；枚举不到对象与重复删除都可视为「没有」。
+const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0003;
+/// `FWP_E_NEVER_MATCH`：枚举模板匹配不到任何对象。
+/// 首次运行尚无任何过滤器时 `FwpmFilterCreateEnumHandle0` 返回该码，属正常情况。
+const FWP_E_NEVER_MATCH: u32 = 0x8032_0033;
 
 const NAME_V4: &str = "ng4|";
 const NAME_V6: &str = "ng6|";
@@ -142,8 +145,11 @@ impl Engine {
         }
     }
 
-    /// 为指定可执行文件添加双栈阻断过滤器，返回过滤器标识。
-    pub fn add_block(&self, app_path: &str) -> io::Result<Vec<u64>> {
+    /// 为指定可执行文件添加阻断过滤器，按需覆盖 IPv4 / IPv6 层，返回过滤器标识。
+    ///
+    /// 只补齐缺失的层：若某路径已有 IPv4 过滤器而缺 IPv6，重复添加双栈会产生
+    /// 多余的 IPv4 过滤器，且多余项以后既不会被使用也不会被清理。
+    pub fn add_block_layers(&self, app_path: &str, want_v4: bool, want_v6: bool) -> io::Result<Vec<u64>> {
         let path = wide(app_path);
         let mut blob: *mut wfp::FWP_BYTE_BLOB = ptr::null_mut();
         unsafe {
@@ -163,10 +169,14 @@ impl Engine {
 
             let mut ids = Vec::with_capacity(2);
             let mut first_err = None;
-            for (layer, name) in [
-                (wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V4, format!("{NAME_V4}{app_path}")),
-                (wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V6, format!("{NAME_V6}{app_path}")),
-            ] {
+            let mut layers = Vec::with_capacity(2);
+            if want_v4 {
+                layers.push((wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V4, format!("{NAME_V4}{app_path}")));
+            }
+            if want_v6 {
+                layers.push((wfp::FWPM_LAYER_ALE_AUTH_CONNECT_V6, format!("{NAME_V6}{app_path}")));
+            }
+            for (layer, name) in layers {
                 match self.add_one(layer, &name, &mut condition) {
                     Ok(id) => ids.push(id),
                     Err(err) => first_err = first_err.or(Some(err)),
@@ -232,7 +242,7 @@ impl Engine {
         unsafe {
             let mut enum_handle: HANDLE = std::mem::zeroed();
             let code = wfp::FwpmFilterCreateEnumHandle0(self.handle, &template, &mut enum_handle);
-            if code == FWP_E_FILTER_NOT_FOUND {
+            if code == FWP_E_FILTER_NOT_FOUND || code == FWP_E_NEVER_MATCH {
                 // 一条过滤器都还没有：空集合，不是错误。
                 return Ok(Vec::new());
             }
@@ -287,11 +297,12 @@ impl Engine {
 
         for path in wanted {
             let have: Vec<&Existing> = existing.iter().filter(|item| &item.path == path).collect();
-            let both = have.iter().any(|item| !item.ipv6) && have.iter().any(|item| item.ipv6);
-            if both {
+            let has_v4 = have.iter().any(|item| !item.ipv6);
+            let has_v6 = have.iter().any(|item| item.ipv6);
+            if has_v4 && has_v6 {
                 report.kept += 1;
             } else {
-                self.add_block(path)?;
+                self.add_block_layers(path, !has_v4, !has_v6)?;
                 report.added += 1;
             }
         }
