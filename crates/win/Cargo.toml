@@ -1,0 +1,47 @@
+[package]
+name = "netguard-win"
+description = "NetGuard 的 Windows 侧实现：WFP 过滤器、服务宿主、ETW 进程哈希守护、WebUI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "netguard_win"
+path = "src/lib.rs"
+
+[[bin]]
+name = "netguard"
+path = "src/bin/netguard.rs"
+
+[[bin]]
+name = "ngcli"
+path = "src/bin/ngcli.rs"
+
+[target.'cfg(windows)'.dependencies]
+netguard-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+getrandom = "0.2"
+tiny_http = "0.12"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_System_WindowsProgramming",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Registry",
+] }
