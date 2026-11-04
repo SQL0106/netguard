@@ -16,6 +16,8 @@ pub mod dpapi;
 #[cfg(windows)]
 pub mod endpoint;
 #[cfg(windows)]
+pub mod engine;
+#[cfg(windows)]
 pub mod log;
 #[cfg(windows)]
 pub mod paths;
