@@ -21,7 +21,8 @@ use std::time::Duration;
 use netguard_core::guard::{basename, hash_reader, HashOutcome};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Diagnostics::Etw::{
-    CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+    CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE,
+    EVENT_CONTROL_CODE_ENABLE_PROVIDER, PROCESSTRACE_HANDLE,
     EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
     PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME,
 };
@@ -73,14 +74,14 @@ fn stop_session(control: u64, properties: &mut [u8]) {
     let mut name = wide(SESSION_NAME);
     let props = properties.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
     unsafe {
-        ControlTraceW(control, name.as_mut_ptr(), props, EVENT_TRACE_CONTROL_STOP);
+        ControlTraceW(CONTROLTRACE_HANDLE { Value: control }, name.as_mut_ptr(), props, EVENT_TRACE_CONTROL_STOP);
     }
 }
 
 fn start_session() -> io::Result<Session> {
     let mut name = wide(SESSION_NAME);
     let mut properties = session_property_buffer();
-    let mut control: u64 = 0;
+    let mut control = CONTROLTRACE_HANDLE { Value: 0 };
 
     unsafe {
         let props = properties.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
@@ -103,9 +104,10 @@ fn start_session() -> io::Result<Session> {
         return Err(io::Error::from_raw_os_error(code as i32));
     }
 
+    let control = control.Value;
     let enable = unsafe {
         EnableTraceEx2(
-            control,
+            CONTROLTRACE_HANDLE { Value: control },
             &PROVIDER,
             EVENT_CONTROL_CODE_ENABLE_PROVIDER,
             4, // TRACE_LEVEL_INFORMATION
@@ -214,7 +216,7 @@ fn handle_start(engine: &Arc<Engine>, pid: u32) {
 
     let outcome = std::fs::File::open(&path)
         .map_err(|err| err.to_string())
-        .and_then(|file| hash_reader(std::io::BufReader::new(file), netguard_core::guard::MAX_HASH_BYTES).map_err(|err| err.to_string()));
+        .and_then(|file| hash_reader(&mut std::io::BufReader::new(file), netguard_core::guard::MAX_HASH_BYTES).map_err(|err| err.to_string()));
 
     let mut blocked = false;
     match outcome {
@@ -289,12 +291,12 @@ pub fn start(engine: Arc<Engine>) -> io::Result<()> {
             logfile.Anonymous1.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
             logfile.Anonymous2.EventRecordCallback = Some(on_event);
             let handle = unsafe { OpenTraceW(&mut logfile) };
-            if handle == u64::MAX {
+            if handle.Value == u64::MAX {
                 RUNNING.store(false, Ordering::SeqCst);
                 return;
             }
             unsafe {
-                ProcessTrace(&[handle], 1, ptr::null(), ptr::null());
+                ProcessTrace(&handle as *const PROCESSTRACE_HANDLE, 1, ptr::null(), ptr::null());
                 CloseTrace(handle);
             }
             let mut properties = session.properties.clone();

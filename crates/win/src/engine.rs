@@ -327,7 +327,7 @@ pub fn spawn_worker(engine: Arc<Engine>) -> std::thread::JoinHandle<()> {
 /// 把本地时间（无时区）转换为带时区时刻。
 ///
 /// 夏令时跳变导致该本地时间不存在时，顺延一小时；歧义（回拨）取较早者。
-fn override_deadline(stamp: Option<i64>) -> Option<chrono::NaiveDateTime> {
+pub(crate) fn override_deadline(stamp: Option<i64>) -> Option<chrono::NaiveDateTime> {
     use chrono::TimeZone;
     stamp
         .and_then(|value| chrono::Local.timestamp_opt(value, 0).single())

@@ -41,13 +41,13 @@ const PBT_APMRESUMESUSPEND: u32 = 0x0007;
 const PBT_APMRESUMEAUTOMATIC: u32 = 0x0012;
 
 static CURRENT_STATE: AtomicU32 = AtomicU32::new(SERVICE_START_PENDING);
-static STATUS_HANDLE: OnceLock<Mutex<SERVICE_STATUS_HANDLE>> = OnceLock::new();
+static STATUS_HANDLE: OnceLock<Mutex<usize>> = OnceLock::new();
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static TICKER: OnceLock<Ticker> = OnceLock::new();
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 
-fn status_handle() -> &'static Mutex<SERVICE_STATUS_HANDLE> {
-    STATUS_HANDLE.get_or_init(|| Mutex::new(std::mem::zeroed()))
+fn status_handle() -> &'static Mutex<usize> {
+    STATUS_HANDLE.get_or_init(|| Mutex::new(0))
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -61,7 +61,7 @@ fn report(state: u32, accepted: u32, wait_hint: u32) {
         Ok(guard) => guard,
         Err(_) => return,
     };
-    if guard.is_null() {
+    if *guard == 0 {
         return;
     }
     let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
@@ -72,7 +72,7 @@ fn report(state: u32, accepted: u32, wait_hint: u32) {
     status.dwCheckPoint = 0;
     status.dwWaitHint = wait_hint;
     unsafe {
-        SetServiceStatus(*guard, &status);
+        SetServiceStatus(*guard as SERVICE_STATUS_HANDLE, &status);
     }
 }
 
@@ -172,13 +172,13 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
 }
 
 fn start_runtime() -> io::Result<Arc<Engine>> {
-    let store = Store::open_default()?;
+    let store = Store::open_default();
     store.ensure()?;
-    let logger = store.logger();
+    let logger = store.logger()?;
     let _ = LOGGER.set(logger.clone());
     logger.info("NetGuard 服务正在启动");
 
-    let engine = Arc::new(Engine::boot(store)?);
+    let engine = Engine::boot(store)?;
     let ticker = engine.ticker().clone();
     let _ = TICKER.set(ticker);
 
@@ -197,7 +197,7 @@ fn start_runtime() -> io::Result<Arc<Engine>> {
     }
 
     let snapshot = engine.snapshot();
-    let evaluation = evaluate(&snapshot.config, chrono::Local::now().timestamp(), snapshot.state.override_until);
+    let evaluation = evaluate(&snapshot.config, chrono::Local::now().timestamp(), crate::engine::override_deadline(snapshot.state.override_until));
     if evaluation.blocked {
         let count = evaluation.paths.len();
         logger.info(&format!("启动时处于拦截时段，当前拦截 {count} 个应用"));

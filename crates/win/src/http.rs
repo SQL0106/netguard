@@ -125,7 +125,7 @@ fn parse_body<T: for<'de> Deserialize<'de>>(request: &mut Request) -> Result<T, 
 fn session_id(request: &Request) -> Option<String> {
     for item in request.headers() {
         if item.field.as_str().as_str().eq_ignore_ascii_case("cookie") {
-            if let Some(value) = session::cookie_value(item.value.as_str(), session::COOKIE_NAME) {
+            if let Some(value) = session::cookie_value(item.value.as_str(), COOKIE_NAME) {
                 return Some(value.to_string());
             }
         }
@@ -242,7 +242,7 @@ fn state_payload(api: &Api, authenticated: bool) -> Value {
         "authenticated": authenticated,
         "blocked": blocked,
         "overridden": evaluation.overridden,
-        "override_until": evaluation.override_until,
+        "override_until": evaluation.override_until.map(|value| value.and_utc().timestamp()),
         "next_change": evaluation.next_change.map(|value| value.and_utc().timestamp()),
         "integrity_ok": snapshot.integrity_ok,
         "integrity_note": snapshot.integrity_note,
