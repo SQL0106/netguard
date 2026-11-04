@@ -345,20 +345,20 @@ fn handle_state(api: &Api, request: &Request) -> Response<std::io::Cursor<Vec<u8
 }
 
 fn handle_config_get(api: &Api, request: &Request) -> Response<std::io::Cursor<Vec<u8>>> {
-    let id = match session_id(request) {
-        Some(value) => value,
-        None => {
-            if api.engine.snapshot().config.auth.factors != Factors::None {
-                return fail(401, "需要登录");
-            }
-            api.sessions.create(Factors::None)
-        }
-    };
-    if api.sessions.touch(&id).is_none() {
-        return fail(401, "会话已失效");
-    }
     let snapshot = api.engine.snapshot();
-    respond_json(&serde_json::to_value(&snapshot.config).unwrap_or(Value::Null), 200, None)
+    if snapshot.config.auth.factors != Factors::None
+        && session_id(request)
+            .and_then(|id| api.sessions.touch(&id))
+            .is_none()
+    {
+        return fail(401, "需要登录");
+    }
+    // 认证材料不下发到浏览器：口令散列、动态口令种子与恢复码散列只留在服务端。
+    let mut value = serde_json::to_value(&snapshot.config).unwrap_or(Value::Null);
+    if let Some(map) = value.as_object_mut() {
+        map.remove("auth");
+    }
+    respond_json(&value, 200, None)
 }
 
 fn handle_config_put(api: &Api, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
