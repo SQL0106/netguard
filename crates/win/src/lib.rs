@@ -28,6 +28,10 @@ pub mod random;
 #[cfg(windows)]
 pub mod session;
 #[cfg(windows)]
+pub mod etw;
+#[cfg(windows)]
+pub mod svc;
+#[cfg(windows)]
 pub mod store;
 #[cfg(windows)]
 pub mod ticker;

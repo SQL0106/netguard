@@ -38,8 +38,8 @@ fn parse_flag(args: &[String], name: &str) -> Option<String> {
 pub fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|value| value.as_str()) {
-        Some("service") => Err(io::Error::other("服务宿主尚未接入")),
-        Some("console") => Err(io::Error::other("服务宿主尚未接入")),
+        Some("service") => crate::svc::run_service(),
+        Some("console") => crate::svc::run_console(),
         Some("setup") => setup(&args[1..]),
         Some("status") => status(),
         Some("config") => config_command(&args[1..]),

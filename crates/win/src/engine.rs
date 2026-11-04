@@ -29,6 +29,8 @@ pub struct Snapshot {
     pub integrity_ok: bool,
     pub integrity_note: String,
     pub applied: Vec<String>,
+    /// 由进程哈希守护追加拦截的路径。
+    pub hash_blocked: Vec<String>,
     pub last_error: Option<String>,
     pub started_at: i64,
 }
@@ -36,6 +38,16 @@ pub struct Snapshot {
 impl Snapshot {
     /// 当前应被拦截的路径集合。
     pub fn blocked_paths(&self) -> Vec<String> {
+        let mut paths = self.core_blocked();
+        for path in &self.hash_blocked {
+            if !paths.iter().any(|item| item == path) {
+                paths.push(path.clone());
+            }
+        }
+        paths
+    }
+
+    fn core_blocked(&self) -> Vec<String> {
         if self.integrity_ok {
             self.evaluation.paths.clone()
         } else {
@@ -55,6 +67,7 @@ pub struct Engine {
     logger: Logger,
     ticker: Ticker,
     inner: Mutex<Inner>,
+    hash_blocked: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Engine {
@@ -91,10 +104,12 @@ impl Engine {
                     integrity_ok,
                     integrity_note,
                     applied: Vec::new(),
+                    hash_blocked: Vec::new(),
                     last_error: None,
                     started_at: chrono::Local::now().timestamp(),
                 },
             }),
+            hash_blocked: Mutex::new(std::collections::BTreeSet::new()),
         });
 
         Ok(engine)
@@ -187,7 +202,7 @@ impl Engine {
             let snapshot = self.snapshot();
             let now = chrono::Local::now().naive_local();
             let evaluation = evaluate(&snapshot.config, now, snapshot.state.override_until);
-            let blocked = if snapshot.integrity_ok {
+            let mut blocked = if snapshot.integrity_ok {
                 evaluation.paths.clone()
             } else {
                 snapshot.config
@@ -196,6 +211,11 @@ impl Engine {
                     .map(|app| app.path.clone())
                     .collect::<Vec<_>>()
             };
+            for path in self.hash_paths() {
+                if !blocked.iter().any(|item| item == &path) {
+                    blocked.push(path);
+                }
+            }
             let signature = (snapshot.integrity_ok, blocked.clone());
 
             if last_signature.as_ref() != Some(&signature) {
@@ -257,6 +277,33 @@ impl Engine {
     fn record_error(&self, message: Option<String>) {
         let mut guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
         guard.snapshot.last_error = message;
+    }
+
+    /// 进程哈希命中时追加临时拦截路径。
+    pub fn add_hash_block(&self, path: &str) -> bool {
+        let mut guard = self.hash_blocked.lock().unwrap_or_else(|err| err.into_inner());
+        let inserted = guard.insert(path.to_string());
+        if inserted {
+            self.logger.warn(&format!("已追加哈希拦截：{path}"));
+        }
+        drop(guard);
+        let paths = self.hash_paths();
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+            inner.snapshot.hash_blocked = paths;
+        }
+        self.ticker.notify();
+        inserted
+    }
+
+    /// 当前由哈希守护追加的路径集合。
+    pub fn hash_paths(&self) -> Vec<String> {
+        let guard = self.hash_blocked.lock().unwrap_or_else(|err| err.into_inner());
+        guard.iter().cloned().collect()
+    }
+
+    pub fn ticker(&self) -> &Ticker {
+        &self.ticker
     }
 
     fn commit(&self, evaluation: &Evaluation, applied: &[String], error: Option<String>) {
