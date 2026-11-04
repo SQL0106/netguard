@@ -26,12 +26,13 @@
 | 日志轮转 | `crates/win/src/log.rs` | 完成 |
 | 配置存储与签名校验、fail-closed | `crates/win/src/store.rs` | 完成 |
 | 边界唤醒等待器（非轮询） | `crates/win/src/ticker.rs` | 完成 |
-| WFP 过滤器与增量协调 | `crates/win/src/wfp.rs` | 已写，待 CI 通过 |
-| 运行时引擎与工作线程 | `crates/win/src/engine.rs` | 已写，待 CI 通过 |
-| 会话与提升验证 | `crates/win/src/session.rs` | 已写，待 CI 通过 |
-| 本地控制台（HTTP API + 静态页面） | `crates/win/src/http.rs`、`web/` | 已写，待 CI 通过 |
-| 服务宿主 | `crates/win/src/svc.rs` | 已写，待 CI 通过 |
-| ETW 哈希守护 | `crates/win/src/etw.rs` | 已写，待 CI 通过 |
+| WFP 过滤器与增量协调 | `crates/win/src/wfp.rs` | 完成 |
+| 运行时引擎与工作线程 | `crates/win/src/engine.rs` | 完成 |
+| 会话与提升验证 | `crates/win/src/session.rs` | 完成 |
+| 本地控制台（HTTP API + 静态页面） | `crates/win/src/http.rs`、`web/` | 完成 |
+| 服务宿主 | `crates/win/src/svc.rs` | 完成 |
+| 配置目录变更监听 | `crates/win/src/watch.rs` | 完成 |
+| ETW 哈希守护 | `crates/win/src/etw.rs` | 完成 |
 | 命令行 | `crates/win/src/cli.rs`、`crates/win/src/cli_client.rs` | 完成 |
 | 安装脚本 | `install.ps1` | 完成 |
 
@@ -79,12 +80,10 @@ sed -n '70,450p' .ci.log | sed 's/^Windows 构建（release）\t构建\t[0-9T:.Z
 
 ## 六、待办
 
-1. 等待当前 CI 运行通过；若仍有编译错误，按上节方法读取日志并修复。
-2. 数据目录变更监听（`ReadDirectoryChangesW`），使外部改动配置后无需等待人工操作即可重算。
-3. 在 `win`（192.168.1.199）上做验收：拦截生效、热点共存、边界翻转、睡眠唤醒、时钟回拨、
+1. 在 `win`（192.168.1.199）上做验收：拦截生效、热点共存、边界翻转、睡眠唤醒、时钟回拨、
    服务无法停止、连续登录失败锁定、TOTP 同码重放拒绝、配置篡改 fail-closed。
-4. 校对 README 与 DESIGN 的措辞，使其与实现完全一致。
-5. 打 `v0.1.0` 标签触发首次 Release。
+2. 校对 README 与 DESIGN 的措辞，使其与实现完全一致。
+3. 打 `v0.1.0` 标签触发首次 Release。
 
 ## 七、实现中的取舍
 

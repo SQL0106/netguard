@@ -18,6 +18,11 @@ use netguard_core::Config;
 use crate::log::Logger;
 use crate::store::{Load, RuntimeState, Store};
 use crate::ticker::Ticker;
+
+/// 允许的时钟回拨容差。系统校时通常只微调数秒，超过此值视为人为回拨。
+const CLOCK_SLACK_SECS: i64 = 120;
+/// 水位线持久化间隔，避免每次唤醒都写盘。
+const WATERMARK_SAVE_SECS: i64 = 300;
 use crate::wfp;
 
 /// 配置与运行状态的快照。
@@ -241,17 +246,43 @@ impl Engine {
         let _ = self.store.save_state(&state);
     }
 
+    /// 观察当前时间戳，返回是否检测到可疑的时钟回拨。
+    ///
+    /// 水位线只增不减：时间正常前进时按间隔持久化，回拨时保留旧值作为下界。
+    fn observe_clock(&self, stamp: i64) -> bool {
+        let watermark = {
+            let guard = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+            guard.snapshot.state.watermark
+        };
+        if stamp + CLOCK_SLACK_SECS < watermark {
+            return true;
+        }
+        if stamp >= watermark + WATERMARK_SAVE_SECS {
+            self.update_state(|state| state.watermark = stamp);
+        }
+        false
+    }
+
     /// 工作线程主循环：只在边界或显式唤醒时执行。
     pub fn run_worker(self: Arc<Self>) {
         let mut engine: Option<wfp::Engine> = None;
         let mut last_signature: Option<(bool, Vec<String>)> = None;
         let mut retry_at: Option<Instant> = None;
+        let mut was_rollback = false;
 
         loop {
             let snapshot = self.snapshot();
             let now = chrono::Local::now().naive_local();
+            let rollback = self.observe_clock(now.and_utc().timestamp());
+            if rollback && !was_rollback {
+                self.logger
+                    .error("检测到系统时间回拨，暂时按全天封锁处理，待时间追上后自动恢复");
+            } else if !rollback && was_rollback {
+                self.logger.info("系统时间已追上水位线，恢复按排程判定");
+            }
+            was_rollback = rollback;
             let evaluation = evaluate(&snapshot.config, now, override_deadline(snapshot.state.override_until));
-            let mut blocked = if snapshot.integrity_ok {
+            let mut blocked = if snapshot.integrity_ok && !rollback {
                 evaluation.paths.clone()
             } else {
                 snapshot.config
