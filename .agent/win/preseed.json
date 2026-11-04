@@ -1,0 +1,17 @@
+{
+  "version": 0,
+  "enabled": true,
+  "apps": [
+    {
+      "name": "curl",
+      "path": "C:\\Windows\\System32\\curl.exe",
+      "schedule": {
+        "windows": []
+      }
+    }
+  ],
+  "hashes": [],
+  "factors": "totp",
+  "recovery_code_count": 3,
+  "totp_secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+}

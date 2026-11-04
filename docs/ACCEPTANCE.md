@@ -5,6 +5,10 @@
 
 记录方式：每条填写「实测结果」与「结论」，失败项附日志片段（`C:\ProgramData\NetGuard\netguard.log`）。
 
+前置条件：`sc.exe query NetGuard` 应返回 1060（服务不存在）；若返回已有服务，先卸载干净再装。
+服务控制权限收紧后管理员无法直接停止或删除，`install.ps1` 会把停止、删除、清理动作交给一次性的
+SYSTEM 计划任务执行，卸载同样走 `install.ps1 -Uninstall [-Purge]`，不要手工 `sc delete`。
+
 ## 零、安装
 
 ```powershell

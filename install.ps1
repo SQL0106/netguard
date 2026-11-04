@@ -112,14 +112,41 @@ function Stop-Target {
     }
 }
 
+
+function Invoke-AsSystem {
+    # 服务控制权限只留给 SYSTEM，管理员无法直接停止或删除服务，
+    # 因此这些动作通过一次性计划任务以 SYSTEM 身份执行。
+    param([Parameter(Mandatory)][string]$Command, [string]$Tag = 'task')
+    $done = Join-Path $env:TEMP ('ng-' + $Tag + '.done')
+    $file = Join-Path $env:TEMP ('ng-' + $Tag + '.ps1')
+    Remove-Item -LiteralPath $done -Force -ErrorAction SilentlyContinue
+    $text = $Command + "`r`n'ok' | Set-Content -LiteralPath '" + $done + "' -Encoding UTF8"
+    Set-Content -LiteralPath $file -Value $text -Encoding UTF8
+    $task = 'NetGuardTask'
+    & schtasks /delete /tn $task /f 2>$null | Out-Null
+    $action = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $file + '"'
+    & schtasks /create /tn $task /ru SYSTEM /rl HIGHEST /sc once /st 00:00 /tr $action /f | Out-Null
+    & schtasks /run /tn $task | Out-Null
+    for ($i = 0; $i -lt 40; $i++) {
+        if (Test-Path $done) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not (Test-Path $done)) { Write-Step '警告：以 SYSTEM 身份执行的任务未在 20 秒内完成。' }
+    & schtasks /delete /tn $task /f 2>$null | Out-Null
+    Remove-Item -LiteralPath $file, $done -Force -ErrorAction SilentlyContinue
+}
+
 function Install-Service {
     $exe = Join-Path $InstallDir 'netguard.exe'
     $existing = Get-Service-State $ServiceName
     if ($existing) {
         if (-not $Force) { Fail 5 '服务已存在，使用 -Force 覆盖安装。' }
-        Stop-Target
-        & sc.exe delete $ServiceName | Out-Null
-        Start-Sleep -Seconds 1
+        Invoke-AsSystem ('& sc.exe stop ' + $ServiceName + ' 2>&1 | Out-Null; Start-Sleep -Milliseconds 800; & sc.exe delete ' + $ServiceName + ' 2>&1 | Out-Null') 'delete'
+        for ($i = 0; $i -lt 20; $i++) {
+            if (-not (Get-Service-State $ServiceName)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (Get-Service-State $ServiceName) { Fail 5 '无法删除已存在的服务。' }
     }
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -149,7 +176,7 @@ function Install-Service {
 
 function Lock-ServiceControl {
     # 仅授予 SYSTEM 启停与配置权限；Administrators 保留读取，避免随手停止或删除。
-    $sddl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)'
+    $sddl = 'D:(A;;SDWDCCLCSWRPWPDTLOCRRC;;;SY)(A;;CCLCSWLOCRRC;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)'
     & sc.exe sdset $ServiceName $sddl | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Step '警告：收紧服务控制权限失败。' }
 }
@@ -171,6 +198,9 @@ function Resolve-Secret {
 function Invoke-Setup {
     $exe = Join-Path $InstallDir 'netguard.exe'
     $preseedPath = Join-Path $DataDir 'preseed.json'
+    # 数据目录此前已被收紧为 Administrators 只读，而初始化要以管理员身份写入
+    # config.json / config.mac / secret.key，因此在这一步临时放开，结束后收回。
+    & icacls $DataDir /grant:r 'Administrators:(OI)(CI)F' | Out-Null
     $effectiveFactors = $Factors
     if ($effectiveFactors -eq 'pw') { $effectiveFactors = 'password' }
 
@@ -208,6 +238,7 @@ function Invoke-Setup {
     Write-Step '正在执行初始化。'
     $process = Start-Process -FilePath $exe -ArgumentList $arguments -Wait -PassThru -NoNewWindow
     Remove-Item -LiteralPath $preseedPath -Force -ErrorAction SilentlyContinue
+    & icacls $DataDir /grant:r 'Administrators:(OI)(CI)RX' | Out-Null
     if ($process.ExitCode -ne 0) { Fail $process.ExitCode '初始化失败，详见数据目录中的日志。' }
     Write-Step '初始化完成。'
 }
@@ -215,13 +246,16 @@ function Invoke-Setup {
 function Remove-Installation {
     $svc = Get-Service-State $ServiceName
     if ($svc) {
-        try { Stop-Target } catch { Write-Step '服务未能正常停止，继续删除。' }
-        & sc.exe delete $ServiceName | Out-Null
-        Write-Step '服务已删除。'
+        Invoke-AsSystem ('& sc.exe stop ' + $ServiceName + ' 2>&1 | Out-Null; Start-Sleep -Milliseconds 800; & sc.exe delete ' + $ServiceName + ' 2>&1 | Out-Null') 'delete'
+        for ($i = 0; $i -lt 20; $i++) {
+            if (-not (Get-Service-State $ServiceName)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (Get-Service-State $ServiceName) { Write-Step '警告：服务未能删除，请重启后重试。' } else { Write-Step '服务已删除。' }
     }
     if ($Purge -and (Test-Path $DataDir)) {
-        Remove-Item -Recurse -Force $DataDir
-        Write-Step '数据目录已删除。'
+        Invoke-AsSystem ('Remove-Item -LiteralPath ''' + $DataDir + ''' -Recurse -Force -ErrorAction SilentlyContinue') 'purge'
+        if (Test-Path $DataDir) { Write-Step '警告：数据目录未能删除，请手动处理。' } else { Write-Step '数据目录已删除。' }
     }
     if (Test-Path $InstallDir) {
         Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue

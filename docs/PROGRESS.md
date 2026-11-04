@@ -126,3 +126,34 @@ sed -n '70,450p' .ci.log | sed 's/^Windows 构建（release）\t构建\t[0-9T:.Z
 
 发布流程提醒：只改发布或打包逻辑时，先看有没有现成的构建制品，能 `gh release upload` 就不要动标签，
 否则会白白触发一次整条流水线。
+
+## 十、真机测试记录（2026-11-04，首次）
+
+目标机 `win`（192.168.1.199）环境：
+
+| 项目 | 值 |
+| --- | --- |
+| 系统 | Windows 10 IoT 企业版 LTSC，build 19044 |
+| PowerShell | 7.6.9 |
+| 账户 | 管理员（已提权） |
+| Defender | 实时保护已关闭 |
+| 磁盘剩余 | 16.8 GB |
+
+按要求先停用 Windows Update：`wuauserv`、`bits`、`dosvc`、`UsoSvc`、`WaaSMedicSvc` 全部设置为
+`Start=4`（Disabled）并停止，组策略 `NoAutoUpdate=1`。经验：**必须先禁用再停止**，若先停止，
+补丁守护会把 `wuauserv`、`bits` 拉起并把启动类型改回去。
+
+### 安装阶段发现的问题（已修复，待复验）
+
+| 现象 | 根因 | 修法 |
+| --- | --- | --- |
+| 安装报「Access to the path 'C:\ProgramData\NetGuard\preseed.json' is denied」，随后 `netguard.exe status` 显示「配置：未初始化」 | `Install-Service` 先把数据目录收紧为 `Administrators:(OI)(CI)RX`，接着 `Invoke-Setup` 又要以管理员身份写入预置文件与 `config.json` | `Invoke-Setup` 期间临时授予 `Administrators:(OI)(CI)F`，初始化结束立即收回 RX |
+| `sc.exe delete NetGuard` 即使以 SYSTEM 身份也返回 5（拒绝访问） | 收紧用的 SDDL 里 SYSTEM 只有 `CCLCSWRPWPDTLOCRRC`，缺少 `DELETE`（`SD`）与 `WRITE_DAC`（`WD`），结果谁都删不掉服务 | SDDL 改为 `(A;;SDWDCCLCSWRPWPDTLOCRRC;;;SY)`，管理员仍然只有查询权限 |
+| `-Force` 覆盖安装与 `-Uninstall` 在管理员身份下必然失败 | 服务控制权收紧后管理员没有 `RP`/`WP`/`DT`/`DELETE` | 新增 `Invoke-AsSystem`：把停止、删除、清理动作写成一次性计划任务，以 SYSTEM 身份执行 |
+
+为清掉当时卡住的服务，删除了注册表键 `HKLM\SYSTEM\CurrentControlSet\Services\NetGuard` 并重启机器。
+该机重启后进入 Fedora（需在 EFI 中调整启动顺序才能回到 Windows），因此 Windows 侧当前没有服务、
+没有数据目录，`C:\ngtest` 下的二进制与预置配置仍在。
+
+**结论**：`v0.1.0` 附带的 `install.ps1` 无法完成安装，必须使用修复后的版本；功能验收（WFP 拦截、
+ETW 守护、热点共存等）尚未开始。
