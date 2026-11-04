@@ -20,9 +20,15 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform as wfp;
 
 /// `RPC_C_AUTHN_WINNT`。常量位于 `Win32::System::Rpc`，此处直接取数值以避免额外特性。
 const AUTHN_WINNT: u32 = 10;
-const ERROR_ALREADY_EXISTS: i32 = 183;
-const ERROR_NOT_FOUND: i32 = 1168;
 const ERROR_SUCCESS: u32 = 0;
+/// Win32 的「找不到」。
+const ERROR_NOT_FOUND: i32 = 1168;
+/// `FWP_E_ALREADY_EXISTS`：WFP 对象（Provider / 子层 / 过滤器）已存在。
+/// 注意它**不是** Win32 的 `ERROR_ALREADY_EXISTS`（183），
+/// 用后者比较会把「已存在」误判成真错误。
+const FWP_E_ALREADY_EXISTS: u32 = 0x8032_0009;
+/// `FWP_E_FILTER_NOT_FOUND`：枚举模板匹配不到任何对象，应视为空集合。
+const FWP_E_FILTER_NOT_FOUND: u32 = 0x8032_0013;
 
 const NAME_V4: &str = "ng4|";
 const NAME_V6: &str = "ng6|";
@@ -115,7 +121,7 @@ impl Engine {
             provider.displayData.name = provider_name.as_mut_ptr();
             provider.displayData.description = provider_desc.as_mut_ptr();
             let code = wfp::FwpmProviderAdd0(self.handle, &provider, ptr::null_mut());
-            if code != ERROR_SUCCESS && code as i32 != ERROR_ALREADY_EXISTS {
+            if code != ERROR_SUCCESS && code != FWP_E_ALREADY_EXISTS {
                 return check(code);
             }
 
@@ -129,7 +135,7 @@ impl Engine {
             sublayer.providerKey = &mut provider_key as *mut GUID;
             sublayer.weight = u16::MAX;
             let code = wfp::FwpmSubLayerAdd0(self.handle, &sublayer, ptr::null_mut());
-            if code != ERROR_SUCCESS && code as i32 != ERROR_ALREADY_EXISTS {
+            if code != ERROR_SUCCESS && code != FWP_E_ALREADY_EXISTS {
                 return check(code);
             }
             Ok(())
@@ -206,6 +212,9 @@ impl Engine {
             if code == ERROR_SUCCESS {
                 return Ok(());
             }
+            if code == FWP_E_FILTER_NOT_FOUND {
+                return Ok(());
+            }
             let err = io::Error::from_raw_os_error(code as i32);
             if is_code(&err, ERROR_NOT_FOUND) {
                 return Ok(());
@@ -223,6 +232,10 @@ impl Engine {
         unsafe {
             let mut enum_handle: HANDLE = std::mem::zeroed();
             let code = wfp::FwpmFilterCreateEnumHandle0(self.handle, &template, &mut enum_handle);
+            if code == FWP_E_FILTER_NOT_FOUND {
+                // 一条过滤器都还没有：空集合，不是错误。
+                return Ok(Vec::new());
+            }
             check(code)?;
 
             let mut found = Vec::new();

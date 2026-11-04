@@ -34,6 +34,30 @@ pub fn sign_bytes(key: &[u8], bytes: &[u8]) -> Result<String, String> {
     Ok(to_hex(&mac.finalize().into_bytes()))
 }
 
+/// 落盘签名行的格式标记。
+pub const SIGNATURE_TAG: &str = "v1";
+
+/// 把十六进制摘要包装成落盘格式（含结尾换行）。
+pub fn format_signature(hex: &str) -> String {
+    format!("{SIGNATURE_TAG}:{hex}\n")
+}
+
+/// 解析落盘签名行，取出十六进制摘要部分。
+///
+/// 落盘格式是 `v1:<64 位十六进制>`；校验时只拿摘要去比，
+/// 若直接把它整行丢进 [`verify_bytes`] 会因长度不同而永远失败。
+pub fn parse_signature(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let (tag, hex) = text.split_once(':')?;
+    if tag != SIGNATURE_TAG {
+        return None;
+    }
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex)
+}
+
 /// 校验签名（恒定时间比较）。
 pub fn verify(key: &[u8], cfg: &Config, mac_hex: &str) -> bool {
     match sign(key, cfg) {
@@ -117,6 +141,24 @@ mod tests {
         let cfg = Config::default();
         let mac = sign(b"key1", &cfg).unwrap();
         assert!(!verify(b"key2", &cfg, &mac));
+    }
+
+    #[test]
+    fn 签名行可往返解析() {
+        let hex = "a".repeat(64);
+        let line = format_signature(&hex);
+        assert_eq!(parse_signature(&line), Some(hex.as_str()));
+        assert_eq!(parse_signature(&format!("  v1:{hex}  ")), Some(hex.as_str()));
+    }
+
+    #[test]
+    fn 无前缀或前缀不符的签名行被拒() {
+        let hex = "a".repeat(64);
+        assert_eq!(parse_signature(&hex), None); // 只有摘要，缺 v1: 前缀
+        assert_eq!(parse_signature(&format!("v2:{hex}")), None);
+        assert_eq!(parse_signature(&format!("v1:{}", "a".repeat(63))), None);
+        assert_eq!(parse_signature(&format!("v1:{}", "z".repeat(64))), None);
+        assert_eq!(parse_signature(""), None);
     }
 
     #[test]

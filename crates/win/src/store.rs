@@ -135,7 +135,11 @@ impl Store {
             Ok(key) => key,
             Err(e) => return Load::Tampered(format!("签名密钥不可用：{e}")),
         };
-        if !mac::verify_bytes(&key, &canonical, signature.trim()) {
+        let hex = match mac::parse_signature(&signature) {
+            Some(hex) => hex,
+            None => return Load::Tampered("签名格式无法识别".to_string()),
+        };
+        if !mac::verify_bytes(&key, &canonical, hex) {
             return Load::Tampered("签名不匹配".to_string());
         }
         if let Err(e) = config.validate() {
@@ -153,10 +157,8 @@ impl Store {
         let key = self.key()?;
         let canonical = serde_json::to_vec(config)?;
         let pretty = serde_json::to_vec_pretty(config)?;
-        let signature = format!(
-            "v1:{}\n",
-            mac::sign_bytes(&key, &canonical)
-                .map_err(|e| io::Error::other(e))?
+        let signature = mac::format_signature(
+            &mac::sign_bytes(&key, &canonical).map_err(io::Error::other)?,
         );
 
         let config_path = self.paths.config();
@@ -192,9 +194,8 @@ impl Store {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let canonical = serde_json::to_vec(&config)?;
         let key = self.key()?;
-        Ok(format!(
-            "v1:{}\n",
-            mac::sign_bytes(&key, &canonical).map_err(|e| io::Error::other(e))?
+        Ok(mac::format_signature(
+            &mac::sign_bytes(&key, &canonical).map_err(io::Error::other)?,
         ))
     }
 }
