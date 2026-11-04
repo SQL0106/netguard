@@ -114,9 +114,19 @@ impl Engine {
         }
     }
 
-    /// 确保 Provider 与子层存在。已存在视为成功。
+    /// 确保 Provider 与子层以「持久化」形态存在。
+    ///
+    /// 旧版本曾用不带标志的 Provider / 子层，它们会残留下来；持久化过滤器引用这种
+    /// 非持久化对象时，`FwpmFilterAdd0` 返回 `FWP_E_LIFETIME_MISMATCH`（0x80320016），
+    /// 且无法事后补救。所以这里先尝试删除同名对象再重建：删除失败（不存在、或仍被
+    /// 现有过滤器引用）一律忽略，随后的「已存在」也视为成功。
     pub fn ensure_provider_sublayer(&self) -> io::Result<()> {
         unsafe {
+            let sub_key = SUBLAYER_KEY;
+            let prov_key = PROVIDER_KEY;
+            wfp::FwpmSubLayerDeleteByKey0(self.handle, &sub_key);
+            wfp::FwpmProviderDeleteByKey0(self.handle, &prov_key);
+
             let mut provider_name = wide("NetGuard");
             let mut provider_desc = wide("NetGuard 应用级网络访问控制");
             let mut provider: wfp::FWPM_PROVIDER0 = std::mem::zeroed();
