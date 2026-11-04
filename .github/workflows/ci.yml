@@ -104,7 +104,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f dist/build.log dist/*.pdb
+          echo "下载到的文件："
+          find dist -type f | head -50
+          # 制品保留仓库相对路径（target/release/*.exe），统一提到顶层
+          find dist -mindepth 2 -type f -name '*.exe' -exec cp -f {} dist/ \;
+          find dist -type f \( -name '*.pdb' -o -name '*.log' \) -delete
+          rm -rf dist/target
           cp install.ps1 dist/
           cp README.md dist/
           cp docs/DESIGN.md dist/
@@ -117,12 +122,18 @@ jobs:
         run: |
           set -euo pipefail
           assets=()
-          for f in dist/*.exe dist/install.ps1 dist/README.md; do
-            [ -f "$f" ] && assets+=("$f")
+          exes=0
+          for f in dist/*.exe; do
+            [ -f "$f" ] || continue
+            exes=$((exes + 1))
+            assets+=("$f")
           done
-          if [ ${#assets[@]} -eq 0 ]; then
-            echo "没有可发布的文件" >&2
+          if [ "$exes" -eq 0 ]; then
+            echo "制品中没有可执行文件，拒绝发布" >&2
             exit 1
           fi
+          for f in dist/install.ps1 dist/README.md dist/DESIGN.md; do
+            [ -f "$f" ] && assets+=("$f")
+          done
           gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
             --title "$GITHUB_REF_NAME" --generate-notes
